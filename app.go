@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const version = "1.0.0"
+const version = "1.1.0"
 
 type App struct {
 	Paths           Paths
@@ -22,6 +22,7 @@ type App struct {
 	Err             io.Writer
 	CWD             string
 	TTY             bool
+	ProgressTTY     bool
 	RelocationHooks RelocationHooks
 }
 
@@ -49,7 +50,15 @@ func newApp() (*App, error) {
 	if info, err := os.Stdin.Stat(); err == nil {
 		tty = info.Mode()&os.ModeCharDevice != 0
 	}
-	return &App{Paths: paths, Config: cfg, Mounts: ProcMountProvider{}, In: os.Stdin, Out: os.Stdout, Err: os.Stderr, CWD: cwd, TTY: tty}, nil
+	progressTTY := false
+	if info, err := os.Stderr.Stat(); err == nil {
+		progressTTY = info.Mode()&os.ModeCharDevice != 0
+	}
+	return &App{Paths: paths, Config: cfg, Mounts: ProcMountProvider{}, In: os.Stdin, Out: os.Stdout, Err: os.Stderr, CWD: cwd, TTY: tty, ProgressTTY: progressTTY}, nil
+}
+
+func (a *App) relocationStatus(operation, name, message string) {
+	newRelocationProgress(a.ProgressTTY, a.Err, operation, name).Status(message)
 }
 
 func (a *App) reloadRegistry() (Registry, error) { return loadRegistry(a.Paths.RegistryFile) }

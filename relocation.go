@@ -169,6 +169,10 @@ func checkFreeSpace(path string, required int64) error {
 }
 
 func copyTree(source, destination string) error {
+	return copyTreeWithProgress(source, destination, nil)
+}
+
+func copyTreeWithProgress(source, destination string, onBytes func(int64)) error {
 	var dirs []struct {
 		path  string
 		mode  os.FileMode
@@ -208,7 +212,7 @@ func copyTree(source, destination string) error {
 			}{to, info.Mode().Perm(), info.ModTime()})
 			return nil
 		case info.Mode().IsRegular():
-			return copyRegular(path, to, info)
+			return copyRegular(path, to, info, onBytes)
 		default:
 			return fmt.Errorf("unsupported filesystem object %s (%s)", path, info.Mode().Type())
 		}
@@ -223,7 +227,7 @@ func copyTree(source, destination string) error {
 	return nil
 }
 
-func copyRegular(source, destination string, info os.FileInfo) error {
+func copyRegular(source, destination string, info os.FileInfo, onBytes func(int64)) error {
 	in, err := os.Open(source)
 	if err != nil {
 		return err
@@ -240,7 +244,11 @@ func copyRegular(source, destination string, info os.FileInfo) error {
 			_ = os.Remove(destination)
 		}
 	}()
-	if _, err = io.Copy(out, in); err != nil {
+	writer := io.Writer(out)
+	if onBytes != nil {
+		writer = &progressWriter{writer: out, onBytes: onBytes}
+	}
+	if _, err = io.Copy(writer, in); err != nil {
 		return err
 	}
 	if err = out.Sync(); err != nil {
@@ -257,6 +265,19 @@ func copyRegular(source, destination string, info os.FileInfo) error {
 	}
 	ok = true
 	return nil
+}
+
+type progressWriter struct {
+	writer  io.Writer
+	onBytes func(int64)
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if n > 0 {
+		w.onBytes(int64(n))
+	}
+	return n, err
 }
 
 func safeRemoveTemporary(path, projectsRoot, txnID string) error {
@@ -281,6 +302,8 @@ func safeRemoveSource(path string, expectedDev, expectedIno uint64, paths Paths,
 }
 
 func (a *App) relocate(reg *Registry, req relocationRequest) error {
+	progress := newRelocationProgress(a.ProgressTTY, a.Err, req.Operation, req.Project.Name)
+	defer progress.CleanLine()
 	if _, err := validateRealDirectory(req.Source); err != nil {
 		return err
 	}
@@ -312,6 +335,7 @@ func (a *App) relocate(reg *Registry, req relocationRequest) error {
 	if req.Project.GitKind == "main-repo-with-linked-worktrees" {
 		return errors.New("relocation refused: the main repository owns linked worktree metadata under .git/worktrees; moving it may break those worktrees")
 	}
+	progress.Status("Scanning source...")
 	before, size, _, err := scanManifest(req.Source)
 	if err != nil {
 		return err
@@ -339,6 +363,7 @@ func (a *App) relocate(reg *Registry, req relocationRequest) error {
 	}
 	same := sameDevice(srcStat, dstStat) && !a.RelocationHooks.ForceCopy
 	if same {
+		progress.Status("Moving atomically on the same filesystem...")
 		if err := os.Rename(req.Source, req.Destination); err != nil {
 			return fmt.Errorf("atomic relocation failed: %w", err)
 		}
@@ -349,6 +374,7 @@ func (a *App) relocate(reg *Registry, req relocationRequest) error {
 			_ = os.Rename(req.Destination, req.Source)
 			return err
 		}
+		progress.Status("Updating registry...")
 		if err := a.commitRelocationRegistry(*reg); err != nil {
 			if rollbackErr := os.Rename(req.Destination, req.Source); rollbackErr != nil {
 				_ = update("registry_commit_failed_destination_preserved")
@@ -379,15 +405,18 @@ func (a *App) relocate(reg *Registry, req relocationRequest) error {
 	if err := update("copying"); err != nil {
 		return err
 	}
+	progress.BeginCopy(size)
 	copyFn := copyTree
 	if a.RelocationHooks.CopyTree != nil {
 		copyFn = a.RelocationHooks.CopyTree
+		if err := copyFn(req.Source, temp); err != nil {
+			return a.copyFailure(progress, temp, req, id, update, err)
+		}
+	} else if err := copyTreeWithProgress(req.Source, temp, progress.AddBytes); err != nil {
+		return a.copyFailure(progress, temp, req, id, update, err)
 	}
-	if err := copyFn(req.Source, temp); err != nil {
-		_ = safeRemoveTemporary(temp, filepath.Dir(req.Destination), id)
-		_ = update("copy_failed")
-		return fmt.Errorf("copy failed; original source remains untouched: %w", err)
-	}
+	progress.FinishCopy()
+	progress.Status("Verifying source snapshot...")
 	if hook := a.RelocationHooks.AfterCopy; hook != nil {
 		if err := hook(req.Source, temp); err != nil {
 			return err
@@ -402,6 +431,7 @@ func (a *App) relocate(reg *Registry, req relocationRequest) error {
 		_ = finishTransaction(a.Paths.StateDir, id)
 		return errors.New("source changed materially during copy; original source was preserved and temporary copy removed; retry when the project is idle")
 	}
+	progress.Status("Finalizing destination...")
 	if err := os.Rename(temp, req.Destination); err != nil {
 		return fmt.Errorf("finalize copied destination: %w", err)
 	}
@@ -412,6 +442,7 @@ func (a *App) relocate(reg *Registry, req relocationRequest) error {
 	if err := applyRelocationRegistry(reg, req); err != nil {
 		return err
 	}
+	progress.Status("Updating registry...")
 	if err := a.commitRelocationRegistry(*reg); err != nil {
 		_ = update("registry_commit_failed_destination_preserved")
 		return fmt.Errorf("destination was finalized but registry commit failed; source and destination were both preserved: %w", err)
@@ -425,6 +456,7 @@ func (a *App) relocate(reg *Registry, req relocationRequest) error {
 			return err
 		}
 	}
+	progress.Status("Checking source before cleanup...")
 	finalManifest, _, _, err := scanManifest(req.Source)
 	if err != nil {
 		_ = update("cleanup_blocked")
@@ -434,6 +466,7 @@ func (a *App) relocate(reg *Registry, req relocationRequest) error {
 		_ = update("cleanup_blocked_source_changed")
 		return errors.New("registry now points to destination, but source changed after copying; both copies were preserved and the transaction journal records required cleanup")
 	}
+	progress.Status("Removing verified old source...")
 	if err := safeRemoveSource(req.Source, dev, ino, a.Paths, a.Config); err != nil {
 		_ = update("cleanup_failed")
 		return fmt.Errorf("registry now points to destination, but old source was preserved because cleanup was unsafe or failed: %w", err)
@@ -442,6 +475,13 @@ func (a *App) relocate(reg *Registry, req relocationRequest) error {
 		return err
 	}
 	return finishTransaction(a.Paths.StateDir, id)
+}
+
+func (a *App) copyFailure(progress *relocationProgress, temp string, req relocationRequest, id string, update func(string) error, err error) error {
+	progress.CleanLine()
+	_ = safeRemoveTemporary(temp, filepath.Dir(req.Destination), id)
+	_ = update("copy_failed")
+	return fmt.Errorf("copy failed; original source remains untouched: %w", err)
 }
 
 func (a *App) commitRelocationRegistry(reg Registry) error {
@@ -587,6 +627,7 @@ func (a *App) cmdImport(args []string) error {
 	if err := a.relocate(&reg, req); err != nil {
 		return err
 	}
+	a.relocationStatus("import", name, "Regenerating generated views...")
 	viewsOK := a.syncStoreViews(store, reg)
 	fmt.Fprintf(a.Out, "Imported %s into the %s store.\n", name, store)
 	a.printMovedCWD(source, destination)
@@ -733,6 +774,7 @@ func (a *App) cmdArchiveRestore(operation string, args []string) error {
 	if err := a.relocate(&reg, req); err != nil {
 		return err
 	}
+	a.relocationStatus(operation, current.Name, "Regenerating generated views...")
 	oldViews := true
 	if err := storeAvailable(a.Config, sourceStore, a.Mounts); err == nil {
 		if err := removeProjectViews(a.Config, oldProject); err != nil {

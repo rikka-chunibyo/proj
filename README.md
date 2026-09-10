@@ -89,6 +89,8 @@ Direct project resolution accepts an exact stable ID, a case-insensitive exact n
 
 `proj import`, `archive`, `restore`, and `remove` prompt before their destructive or identity-changing step. In scripts or other noninteractive input, explicitly pass `--yes`/`-y`.
 
+On an interactive terminal, cross-filesystem relocations show one live byte-based progress line with percentage, transferred/total size, throughput, and ETA. Verification, finalization, registry, cleanup, and view phases are reported concisely. Redirected and other non-TTY output remains free of animation and terminal-control sequences; same-filesystem atomic renames never display a fake copy bar.
+
 ## Import root discovery
 
 Without `--exact-root`, import behaves as follows:
