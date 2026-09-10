@@ -7,13 +7,12 @@ disposable symlink views.
 ```text
 ~/code/
 ├── projects/       real active projects on SSD
-├── archive/        bind mount exposing archived projects
+├── archive/        symlink to /mnt/hdd/archive
 ├── by-tag/         one global proj-managed view
 └── by-language/    one global proj-managed view
 
 /mnt/hdd/
-└── archive/
-    └── code/        real archived projects on HDD
+└── archive/        real archived projects on HDD
 ```
 
 The archive is a storage tier, not a second namespace. Project names remain
@@ -43,8 +42,7 @@ database, runtime, or network service.
 The active workspace can be initialized as the normal user:
 
 ```bash
-mkdir -p "$HOME/code/projects" "$HOME/code/archive" \
-  "$HOME/code/by-tag" "$HOME/code/by-language"
+mkdir -p "$HOME/code/projects" "$HOME/code/by-tag" "$HOME/code/by-language"
 ```
 
 Before configuring the archive, make sure `/mnt/hdd` is the intended mounted
@@ -54,30 +52,28 @@ configuration and is intentionally outside `proj`.
 Create the physical archive directory with ownership for the current user:
 
 ```bash
-sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 0755 /mnt/hdd/archive/code
+sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 0755 /mnt/hdd/archive
 ```
 
-Add this bind mount to `/etc/fstab` (fstab does not expand `~`, so use the
-absolute home path):
-
-```fstab
-/mnt/hdd/archive/code /home/rikka/code/archive none bind,nofail,x-systemd.requires-mounts-for=/mnt/hdd 0 0
-```
-
-Then mount and verify it:
+Create the logical workspace symlink as the normal user:
 
 ```bash
-sudo mount /home/rikka/code/archive
+ln -s /mnt/hdd/archive "$HOME/code/archive"
+```
+
+Then verify it:
+
+```bash
 findmnt --target /mnt/hdd
-findmnt --target /home/rikka/code/archive
+readlink "$HOME/code/archive"
 proj doctor
 ```
 
 `proj archive` and `proj import --store archive` refuse to start unless the HDD
-mount, writable physical backing directory, and correct bind mount are all
+mount, writable physical backing directory, and correct workspace symlink are all
 healthy. `proj restore` and archived `proj refresh` deliberately use the
-physical backing path and remain recovery-capable if only the bind mount is
-broken. `proj` never repairs or remounts system filesystems itself.
+physical backing path and remain recovery-capable if only the workspace symlink is
+broken. `proj` never repairs the link or remounts system filesystems itself.
 
 The prior archive layout can be removed only after checking it contains no
 project data. Empty legacy directories can be removed safely with `rmdir`:
@@ -112,7 +108,7 @@ root = "~/code"
 backing = "~/code/projects"
 
 [stores.archive]
-backing = "/mnt/hdd/archive/code"
+backing = "/mnt/hdd/archive"
 mount = "/mnt/hdd"
 workspace_path = "~/code/archive"
 
@@ -177,8 +173,8 @@ confined to `proj find`. Generated view paths resolve to their registered
 project, while unrelated external symlinks do not acquire project identity.
 
 For archived projects, `proj path` prints `~/code/archive/<name>` only when the
-bind mount is verified and navigable. `proj info` shows that logical path and
-the physical `/mnt/hdd/archive/code/<name>` backing path. List/find/tag metadata
+workspace symlink is verified and navigable. `proj info` shows that logical path and
+the physical `/mnt/hdd/archive/<name>` backing path. List/find/tag metadata
 continue to work when the archive is offline.
 
 ## Global generated views

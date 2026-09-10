@@ -48,7 +48,7 @@ func discoverPaths(getenv func(string) string, home string) (Paths, error) {
 
 func defaultConfig(home string) Config {
 	workspace := filepath.Join(home, "code")
-	return Config{Version: configSchemaVersion, WorkspaceRoot: workspace, Stores: map[string]StoreConfig{"active": {Backing: filepath.Join(workspace, "projects")}, "archive": {Backing: "/mnt/hdd/archive/code", Mount: "/mnt/hdd", WorkspacePath: filepath.Join(workspace, "archive")}}, Views: ViewConfig{Tags: filepath.Join(workspace, "by-tag"), Languages: filepath.Join(workspace, "by-language")}}
+	return Config{Version: configSchemaVersion, WorkspaceRoot: workspace, Stores: map[string]StoreConfig{"active": {Backing: filepath.Join(workspace, "projects")}, "archive": {Backing: "/mnt/hdd/archive", Mount: "/mnt/hdd", WorkspacePath: filepath.Join(workspace, "archive")}}, Views: ViewConfig{Tags: filepath.Join(workspace, "by-tag"), Languages: filepath.Join(workspace, "by-language")}}
 }
 
 func expandHome(path, home string) (string, error) {
@@ -162,7 +162,7 @@ func parseConfig(text, home string) (Config, error) {
 		return Config{}, err
 	}
 	if cfg.Version == 1 || legacyRootKey {
-		return Config{}, &LegacyConfigError{Message: "legacy proj config layout detected; registry data was not changed. Install the schema-v2 config after completing the documented archive/bind-mount setup, then run `proj doctor`"}
+		return Config{}, &LegacyConfigError{Message: "legacy proj config layout detected; registry data was not changed. Install the schema-v2 config after preparing /mnt/hdd/archive and the documented ~/code/archive symlink, then run `proj doctor`"}
 	}
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err

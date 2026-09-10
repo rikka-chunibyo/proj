@@ -535,7 +535,7 @@ func (a *App) cmdInfo(args []string) error {
 		} else if _, err := validateRealDirectory(backing); err != nil {
 			status = "missing or invalid"
 		} else if err := archiveWorkspaceAvailable(a.Config, a.Mounts); err != nil {
-			status = "offline (workspace bind mount unavailable or misconfigured)"
+			status = "offline (workspace archive symlink unavailable or misconfigured)"
 		} else if _, err := validateRealDirectory(path); err != nil {
 			status = "missing or invalid"
 		}

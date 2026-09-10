@@ -7,7 +7,7 @@ root = "~/code"
 backing = "~/code/projects"
 
 [stores.archive]
-backing = "/mnt/hdd/archive/code"
+backing = "/mnt/hdd/archive"
 mount = "/mnt/hdd"
 workspace_path = "~/code/archive"
 

@@ -41,7 +41,7 @@ func (a *App) cmdDoctor(args []string) error {
 	d := doctorReport{}
 	if a.ConfigErr != nil {
 		d.errors = append(d.errors, "config invalid or requires migration: "+a.ConfigErr.Error())
-		d.info = append(d.info, "registry is preserved; replace the config only after preparing /mnt/hdd/archive/code and the ~/code/archive bind mount")
+		d.info = append(d.info, "registry is preserved; replace the config only after preparing /mnt/hdd/archive and the ~/code/archive symlink")
 	} else {
 		d.info = append(d.info, fmt.Sprintf("config valid (schema version %d)", a.Config.Version))
 	}
@@ -96,6 +96,7 @@ func doctorArchive(d *doctorReport, a *App, reg Registry) {
 			}
 		}
 		d.warnings = append(d.warnings, fmt.Sprintf("%v; %d archived project(s) remain registered and were not classified as missing", err, count))
+		doctorArchiveWorkspaceLink(d, a.Config, false)
 		return
 	}
 	d.info = append(d.info, "HDD backing mount: AVAILABLE: "+archive.Mount)
@@ -123,11 +124,7 @@ func doctorArchive(d *doctorReport, a *App, reg Registry) {
 			d.info = append(d.info, "archive backing directory: writable")
 		}
 	}
-	if err := validateArchiveWorkspaceMount(a.Config, a.Mounts); err != nil {
-		d.errors = append(d.errors, "Archive workspace mount: MISCONFIGURED: "+err.Error())
-	} else {
-		d.info = append(d.info, "Archive workspace mount: HEALTHY: "+archive.WorkspacePath+" exposes "+archive.Backing)
-	}
+	doctorArchiveWorkspaceLink(d, a.Config, true)
 	if backingOK {
 		doctorBackingProjects(d, a.Config, "archive", true, reg)
 	}
@@ -136,6 +133,19 @@ func doctorArchive(d *doctorReport, a *App, reg Registry) {
 			d.warnings = append(d.warnings, "old archive-layout remnant detected: "+old)
 		}
 	}
+}
+
+func doctorArchiveWorkspaceLink(d *doctorReport, cfg Config, backingMounted bool) {
+	archive := cfg.Stores["archive"]
+	if err := validateArchiveWorkspaceLink(cfg); err != nil {
+		d.errors = append(d.errors, "Archive workspace symlink: MISCONFIGURED: "+err.Error())
+		return
+	}
+	status := "HEALTHY"
+	if !backingMounted {
+		status = "CONFIGURED (target unavailable with HDD)"
+	}
+	d.info = append(d.info, "Archive workspace symlink: "+status+": "+archive.WorkspacePath+" -> "+archive.Backing)
 }
 
 func doctorBackingProjects(d *doctorReport, cfg Config, store string, available bool, reg Registry) {

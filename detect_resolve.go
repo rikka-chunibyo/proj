@@ -190,7 +190,7 @@ func canonicalDirectoryForPath(cfg Config, mounts MountProvider, value string) (
 var errOutsideManaged = errors.New("path is outside configured canonical project stores")
 
 // managedProjectForPath maps physical active/archive paths and the logical
-// archive bind mount to the single physical canonical directory. Symlinks are
+// archive access symlink to the single physical canonical directory. Symlinks are
 // resolved only beneath proj's generated roots; arbitrary external symlinks do
 // not acquire project identity merely because they point at a project.
 func managedProjectForPath(cfg Config, mounts MountProvider, abs string, allowViews bool) (string, string, error) {

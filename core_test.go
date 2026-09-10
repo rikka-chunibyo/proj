@@ -21,11 +21,7 @@ func (f fakeMounts) MountRecords() ([]MountRecord, error) {
 }
 
 func healthyFakeMounts(mount, backing, logical string) fakeMounts {
-	rel, _ := filepath.Rel(mount, backing)
-	return fakeMounts{records: []MountRecord{
-		{Device: "8:1", Root: "/", MountPoint: mount, FSType: "virtiofs", Options: []string{"rw"}},
-		{Device: "8:1", Root: filepath.Join("/", rel), MountPoint: logical, FSType: "none", Options: []string{"rw"}},
-	}}
+	return fakeMounts{records: []MountRecord{{Device: "8:1", Root: "/", MountPoint: mount, FSType: "virtiofs", Options: []string{"rw"}}}}
 }
 
 func testApp(t *testing.T) (*App, string) {
@@ -35,12 +31,15 @@ func testApp(t *testing.T) (*App, string) {
 	workspace := filepath.Join(root, "home", "code")
 	active := filepath.Join(workspace, "projects")
 	mount := filepath.Join(root, "mnt")
-	archive := filepath.Join(mount, "archive", "code")
+	archive := filepath.Join(mount, "archive")
 	logicalArchive := filepath.Join(workspace, "archive")
-	for _, dir := range []string{home, active, archive, logicalArchive} {
+	for _, dir := range []string{home, active, archive} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.Symlink(archive, logicalArchive); err != nil {
+		t.Fatal(err)
 	}
 	paths := Paths{Home: home, ConfigFile: filepath.Join(root, "config", "proj", "config.toml"), RegistryFile: filepath.Join(root, "data", "proj", "projects.toml"), StateDir: filepath.Join(root, "state", "proj")}
 	cfg := Config{

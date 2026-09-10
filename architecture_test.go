@@ -95,8 +95,11 @@ func TestArchiveRestoreRetargetGlobalViews(t *testing.T) {
 		t.Fatalf("archive target %q", got)
 	}
 	// Restore reads the physical source and remains a recovery operation even
-	// if the workspace bind mount is absent.
+	// if the workspace archive symlink is absent.
 	a.Mounts = hddOnlyFakeMounts(a.Config)
+	if err := os.Remove(a.Config.Stores["archive"].WorkspacePath); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.Run([]string{"restore", "Rune", "--yes"}); err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +108,7 @@ func TestArchiveRestoreRetargetGlobalViews(t *testing.T) {
 	}
 }
 
-func TestArchiveWritesRequireHealthyWorkspaceBind(t *testing.T) {
+func TestArchiveWritesRequireHealthyWorkspaceSymlink(t *testing.T) {
 	a, root := testApp(t)
 	source := makeProject(t, a, "active", "Matrix")
 	writeFile(t, filepath.Join(source, "x.go"), "package x", 0o644)
@@ -113,21 +116,24 @@ func TestArchiveWritesRequireHealthyWorkspaceBind(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Mounts = hddOnlyFakeMounts(a.Config)
+	if err := os.Remove(a.Config.Stores["archive"].WorkspacePath); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.Run([]string{"archive", "Matrix", "--yes"}); err == nil || !strings.Contains(err.Error(), "workspace") {
-		t.Fatalf("archive without bind: %v", err)
+		t.Fatalf("archive without workspace symlink: %v", err)
 	}
 	if _, err := os.Stat(source); err != nil {
-		t.Fatal("archive changed source before bind validation")
+		t.Fatal("archive changed source before symlink validation")
 	}
 	external := filepath.Join(root, "external", "ColdImport")
 	if err := os.MkdirAll(external, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Run([]string{"import", external, "--store", "archive", "--yes", "--exact-root"}); err == nil || !strings.Contains(err.Error(), "workspace") {
-		t.Fatalf("archive import without bind: %v", err)
+		t.Fatalf("archive import without workspace symlink: %v", err)
 	}
 	if _, err := os.Stat(external); err != nil {
-		t.Fatal("archive import changed source before bind validation")
+		t.Fatal("archive import changed source before symlink validation")
 	}
 }
 
@@ -148,7 +154,7 @@ func TestArchivedRefreshUsesPhysicalBackingWithoutBind(t *testing.T) {
 	}
 }
 
-func TestArchivedPathIsLogicalAndRequiresCorrectBind(t *testing.T) {
+func TestArchivedPathIsLogicalAndRequiresCorrectSymlink(t *testing.T) {
 	a, _ := testApp(t)
 	physical := makeProject(t, a, "archive", "Cold")
 	logical := filepath.Join(a.Config.Stores["archive"].WorkspacePath, "Cold")
@@ -166,18 +172,21 @@ func TestArchivedPathIsLogicalAndRequiresCorrectBind(t *testing.T) {
 		t.Fatalf("path output %q, want logical %q", got, logical)
 	}
 	resetOutput(a)
-	wrong := hddOnlyFakeMounts(a.Config)
-	wrong.records = append(wrong.records, MountRecord{Device: "8:1", Root: "/wrong", MountPoint: a.Config.Stores["archive"].WorkspacePath, Options: []string{"rw"}})
-	a.Mounts = wrong
+	if err := os.Remove(a.Config.Stores["archive"].WorkspacePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(filepath.Dir(physical), "wrong"), a.Config.Stores["archive"].WorkspacePath); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.Run([]string{"path", "Cold"}); err == nil || !strings.Contains(err.Error(), "wrong backing") {
-		t.Fatalf("wrong bind path result: %v", err)
+		t.Fatalf("wrong workspace symlink path result: %v", err)
 	}
 	if outString(a) != "" {
 		t.Fatalf("failed path polluted stdout: %q", outString(a))
 	}
 }
 
-func TestGeneratedArchivePathResolvesOnlyWithHealthyBind(t *testing.T) {
+func TestGeneratedArchivePathResolvesOnlyWithHealthyWorkspaceSymlink(t *testing.T) {
 	a, _ := testApp(t)
 	makeProject(t, a, "archive", "Cold")
 	if err := os.MkdirAll(filepath.Join(a.Config.Stores["archive"].WorkspacePath, "Cold"), 0o755); err != nil {
@@ -192,9 +201,11 @@ func TestGeneratedArchivePathResolvesOnlyWithHealthyBind(t *testing.T) {
 	if err != nil || p.Name != "Cold" {
 		t.Fatalf("healthy generated archive path: %+v, %v", p, err)
 	}
-	a.Mounts = hddOnlyFakeMounts(a.Config)
+	if err := os.Remove(a.Config.Stores["archive"].WorkspacePath); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := resolveProject(reg, a.Config, a.Mounts, view); err == nil {
-		t.Fatal("generated archive path resolved without bind mount")
+		t.Fatal("generated archive path resolved without workspace symlink")
 	}
 }
 
@@ -228,20 +239,23 @@ func TestArchiveAvailabilityStatesAndDoctor(t *testing.T) {
 		t.Fatalf("read-only mount accepted: %v", err)
 	}
 	a.Mounts = hddOnlyFakeMounts(a.Config)
-	if err := archiveWorkspaceAvailable(a.Config, a.Mounts); err == nil || !strings.Contains(err.Error(), "not a mount point") {
-		t.Fatalf("missing bind not distinguished: %v", err)
+	if err := os.Remove(a.Config.Stores["archive"].WorkspacePath); err != nil {
+		t.Fatal(err)
 	}
-	wrong := hddOnlyFakeMounts(a.Config)
-	wrong.records = append(wrong.records, MountRecord{Device: "8:1", Root: "/other", MountPoint: a.Config.Stores["archive"].WorkspacePath, Options: []string{"rw"}})
-	if err := archiveWorkspaceAvailable(a.Config, wrong); err == nil || !strings.Contains(err.Error(), "wrong backing") {
-		t.Fatalf("wrong bind not distinguished: %v", err)
+	if err := archiveWorkspaceAvailable(a.Config, a.Mounts); err == nil || !strings.Contains(err.Error(), "symlink missing") {
+		t.Fatalf("missing symlink not distinguished: %v", err)
 	}
-	a.Mounts = wrong
+	if err := os.Symlink(filepath.Join(a.Config.Stores["archive"].Mount, "other"), a.Config.Stores["archive"].WorkspacePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := archiveWorkspaceAvailable(a.Config, a.Mounts); err == nil || !strings.Contains(err.Error(), "wrong backing") {
+		t.Fatalf("wrong symlink not distinguished: %v", err)
+	}
 	a.Out = &bytes.Buffer{}
 	if err := a.Run([]string{"doctor"}); err == nil {
-		t.Fatal("doctor should fail for wrong workspace bind")
+		t.Fatal("doctor should fail for wrong workspace symlink")
 	}
-	if !strings.Contains(outString(a), "Archive backing store: AVAILABLE") || !strings.Contains(outString(a), "Archive workspace mount: MISCONFIGURED") {
+	if !strings.Contains(outString(a), "Archive backing store: AVAILABLE") || !strings.Contains(outString(a), "Archive workspace symlink: MISCONFIGURED") {
 		t.Fatal(outString(a))
 	}
 }
@@ -373,7 +387,7 @@ func TestConfigRejectsOverlappingManagedRootsAndRootMount(t *testing.T) {
 	cfg = a.Config
 	archive := cfg.Stores["archive"]
 	archive.Mount = "/"
-	archive.Backing = "/archive/code"
+	archive.Backing = "/archive"
 	cfg.Stores["archive"] = archive
 	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "cannot be /") {
 		t.Fatalf("filesystem root accepted as archive mount: %v", err)

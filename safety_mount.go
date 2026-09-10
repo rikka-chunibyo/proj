@@ -89,7 +89,7 @@ func normalizeTag(tag string) (string, error) {
 
 func validateSafeSource(path string, paths Paths, cfg Config) error {
 	path = filepath.Clean(path)
-	protected := map[string]string{"filesystem root": string(filepath.Separator), "home directory": paths.Home, "workspace root": cfg.WorkspaceRoot, "active backing root": cfg.Stores["active"].Backing, "archive backing root": cfg.Stores["archive"].Backing, "archive workspace mount": cfg.Stores["archive"].WorkspacePath, "tag-view root": cfg.Views.Tags, "language-view root": cfg.Views.Languages}
+	protected := map[string]string{"filesystem root": string(filepath.Separator), "home directory": paths.Home, "workspace root": cfg.WorkspaceRoot, "active backing root": cfg.Stores["active"].Backing, "archive backing root": cfg.Stores["archive"].Backing, "archive workspace link": cfg.Stores["archive"].WorkspacePath, "tag-view root": cfg.Views.Tags, "language-view root": cfg.Views.Languages}
 	for label, unsafe := range protected {
 		if unsafe != "" && path == filepath.Clean(unsafe) {
 			return fmt.Errorf("refusing to use %s as a project", label)
@@ -197,7 +197,7 @@ func mountHasOption(record MountRecord, want string) bool {
 func topology(mounts MountProvider) ([]MountRecord, error) {
 	provider, ok := mounts.(MountTopologyProvider)
 	if !ok {
-		return nil, errors.New("mount provider cannot validate bind-mount topology")
+		return nil, errors.New("mount provider cannot validate filesystem topology")
 	}
 	return provider.MountRecords()
 }
@@ -314,46 +314,32 @@ func archiveWorkspaceAvailable(cfg Config, mounts MountProvider) error {
 	if err := archiveBackingAvailable(cfg, mounts); err != nil {
 		return err
 	}
-	return validateArchiveWorkspaceMount(cfg, mounts)
+	return validateArchiveWorkspaceLink(cfg)
 }
 
-// validateArchiveWorkspaceMount checks only the logical access mount. Keeping
-// it independent from backing-directory existence lets doctor report both
-// system faults separately instead of collapsing one into the other.
-func validateArchiveWorkspaceMount(cfg Config, mounts MountProvider) error {
+// validateArchiveWorkspaceLink checks the logical access symlink independently
+// from backing availability so doctor can report both faults separately.
+func validateArchiveWorkspaceLink(cfg Config) error {
 	archive := cfg.Stores["archive"]
 	info, err := os.Lstat(archive.WorkspacePath)
 	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("archive workspace bind mount missing: %s", archive.WorkspacePath)
+		return fmt.Errorf("archive workspace symlink missing: %s", archive.WorkspacePath)
 	}
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("archive workspace path %s is a symlink; a bind mount is required", archive.WorkspacePath)
+	if info.Mode()&os.ModeSymlink == 0 {
+		return fmt.Errorf("archive workspace path %s must be a symlink", archive.WorkspacePath)
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("archive workspace path %s is not a directory", archive.WorkspacePath)
-	}
-	records, err := topology(mounts)
+	target, err := os.Readlink(archive.WorkspacePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("read archive workspace symlink: %w", err)
 	}
-	logical, ok := exactMountRecord(records, archive.WorkspacePath)
-	if !ok {
-		return fmt.Errorf("archive workspace path is not a mount point: %s", archive.WorkspacePath)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(archive.WorkspacePath), target)
 	}
-	hddMount, ok := exactMountRecord(records, archive.Mount)
-	if !ok {
-		return fmt.Errorf("HDD backing mount unavailable: %s is not an exact mount point", archive.Mount)
-	}
-	rel, err := filepath.Rel(hddMount.MountPoint, archive.Backing)
-	if err != nil {
-		return err
-	}
-	expectedRoot := filepath.Clean(filepath.Join(hddMount.Root, rel))
-	if logical.Device != hddMount.Device || filepath.Clean(logical.Root) != expectedRoot {
-		return fmt.Errorf("archive workspace mount points to the wrong backing directory: expected %s to expose %s", archive.WorkspacePath, archive.Backing)
+	if filepath.Clean(target) != filepath.Clean(archive.Backing) {
+		return fmt.Errorf("archive workspace symlink points to the wrong backing directory: %s -> %s (expected %s)", archive.WorkspacePath, target, archive.Backing)
 	}
 	return nil
 }
