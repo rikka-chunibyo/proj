@@ -29,7 +29,7 @@ type Registry struct {
 	Projects []Project
 }
 
-func emptyRegistry() Registry { return Registry{Version: schemaVersion} }
+func emptyRegistry() Registry { return Registry{Version: registrySchemaVersion} }
 
 func newID() (string, error) {
 	b := make([]byte, 16)
@@ -49,7 +49,20 @@ func canonicalPath(cfg Config, p Project) (string, error) {
 	if err := validateProjectName(p.Name); err != nil {
 		return "", fmt.Errorf("project %q has invalid name: %w", p.Name, err)
 	}
-	return filepath.Join(store.Root, "projects", p.Name), nil
+	return filepath.Join(store.Backing, p.Name), nil
+}
+
+func logicalPath(cfg Config, p Project) (string, error) {
+	if p.Store == "active" {
+		return canonicalPath(cfg, p)
+	}
+	if p.Store != "archive" {
+		return "", fmt.Errorf("project %q refers to unknown store %q", p.Name, p.Store)
+	}
+	if err := validateProjectName(p.Name); err != nil {
+		return "", err
+	}
+	return filepath.Join(cfg.Stores["archive"].WorkspacePath, p.Name), nil
 }
 
 func normalizeRegistry(reg *Registry) {
@@ -87,8 +100,8 @@ func sortedUnique(values []string) []string {
 }
 
 func validateRegistry(reg Registry) error {
-	if reg.Version != schemaVersion {
-		return fmt.Errorf("unsupported registry version %d (supported: %d)", reg.Version, schemaVersion)
+	if reg.Version != registrySchemaVersion {
+		return fmt.Errorf("unsupported registry version %d (supported: %d)", reg.Version, registrySchemaVersion)
 	}
 	ids := map[string]string{}
 	var priorNames []string

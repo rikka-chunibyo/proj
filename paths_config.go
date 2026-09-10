@@ -10,24 +10,21 @@ import (
 	"strings"
 )
 
-const schemaVersion = 1
+const configSchemaVersion = 2
+const registrySchemaVersion = 1
 
-type Paths struct {
-	Home         string
-	ConfigFile   string
-	RegistryFile string
-	StateDir     string
-}
-
-type StoreConfig struct {
-	Root  string
-	Mount string
-}
-
+type Paths struct{ Home, ConfigFile, RegistryFile, StateDir string }
+type StoreConfig struct{ Backing, Mount, WorkspacePath string }
+type ViewConfig struct{ Tags, Languages string }
 type Config struct {
-	Version int
-	Stores  map[string]StoreConfig
+	Version       int
+	WorkspaceRoot string
+	Stores        map[string]StoreConfig
+	Views         ViewConfig
 }
+type LegacyConfigError struct{ Message string }
+
+func (e *LegacyConfigError) Error() string { return e.Message }
 
 func discoverPaths(getenv func(string) string, home string) (Paths, error) {
 	if home == "" {
@@ -42,25 +39,16 @@ func discoverPaths(getenv func(string) string, home string) (Paths, error) {
 		}
 		return filepath.Join(home, fallback)
 	}
-	config := base("XDG_CONFIG_HOME", ".config")
-	data := base("XDG_DATA_HOME", filepath.Join(".local", "share"))
-	state := base("XDG_STATE_HOME", filepath.Join(".local", "state"))
+	config, data, state := base("XDG_CONFIG_HOME", ".config"), base("XDG_DATA_HOME", filepath.Join(".local", "share")), base("XDG_STATE_HOME", filepath.Join(".local", "state"))
 	if config == "" || data == "" || state == "" {
 		return Paths{}, errors.New("XDG_CONFIG_HOME, XDG_DATA_HOME, and XDG_STATE_HOME must be absolute when set")
 	}
-	return Paths{
-		Home:         filepath.Clean(home),
-		ConfigFile:   filepath.Join(config, "proj", "config.toml"),
-		RegistryFile: filepath.Join(data, "proj", "projects.toml"),
-		StateDir:     filepath.Join(state, "proj"),
-	}, nil
+	return Paths{filepath.Clean(home), filepath.Join(config, "proj", "config.toml"), filepath.Join(data, "proj", "projects.toml"), filepath.Join(state, "proj")}, nil
 }
 
 func defaultConfig(home string) Config {
-	return Config{Version: schemaVersion, Stores: map[string]StoreConfig{
-		"active":  {Root: filepath.Join(home, "code")},
-		"archive": {Root: "/mnt/hdd/code", Mount: "/mnt/hdd"},
-	}}
+	workspace := filepath.Join(home, "code")
+	return Config{Version: configSchemaVersion, WorkspaceRoot: workspace, Stores: map[string]StoreConfig{"active": {Backing: filepath.Join(workspace, "projects")}, "archive": {Backing: "/mnt/hdd/archive/code", Mount: "/mnt/hdd", WorkspacePath: filepath.Join(workspace, "archive")}}, Views: ViewConfig{Tags: filepath.Join(workspace, "by-tag"), Languages: filepath.Join(workspace, "by-language")}}
 }
 
 func expandHome(path, home string) (string, error) {
@@ -74,7 +62,7 @@ func expandHome(path, home string) (string, error) {
 	case filepath.IsAbs(path):
 		return filepath.Clean(path), nil
 	default:
-		return "", fmt.Errorf("store path %q must be absolute or start with ~/", path)
+		return "", fmt.Errorf("configured path %q must be absolute or start with ~/", path)
 	}
 }
 
@@ -93,6 +81,7 @@ func loadConfig(path, home string) (Config, bool, error) {
 func parseConfig(text, home string) (Config, error) {
 	cfg := Config{Stores: map[string]StoreConfig{}}
 	section := ""
+	legacyRootKey := false
 	scanner := bufio.NewScanner(strings.NewReader(text))
 	lineNo := 0
 	for scanner.Scan() {
@@ -106,7 +95,9 @@ func parseConfig(text, home string) (Config, error) {
 				return Config{}, fmt.Errorf("config line %d: malformed section", lineNo)
 			}
 			section = strings.TrimSpace(line[1 : len(line)-1])
-			if section != "stores.active" && section != "stores.archive" {
+			switch section {
+			case "workspace", "stores.active", "stores.archive", "views":
+			default:
 				return Config{}, fmt.Errorf("config line %d: unknown section %q", lineNo, section)
 			}
 			continue
@@ -130,23 +121,48 @@ func parseConfig(text, home string) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("config line %d: %w", lineNo, err)
 		}
-		storeName := strings.TrimPrefix(section, "stores.")
-		store := cfg.Stores[storeName]
-		switch key {
-		case "root":
-			store.Root, err = expandHome(value, home)
-		case "mount":
-			store.Mount, err = expandHome(value, home)
-		default:
-			return Config{}, fmt.Errorf("config line %d: unknown key %q", lineNo, key)
-		}
+		value, err = expandHome(value, home)
 		if err != nil {
 			return Config{}, fmt.Errorf("config line %d: %w", lineNo, err)
 		}
-		cfg.Stores[storeName] = store
+		switch section {
+		case "workspace":
+			if key != "root" {
+				return Config{}, fmt.Errorf("config line %d: unknown key %q", lineNo, key)
+			}
+			cfg.WorkspaceRoot = value
+		case "stores.active", "stores.archive":
+			name := strings.TrimPrefix(section, "stores.")
+			store := cfg.Stores[name]
+			switch key {
+			case "backing":
+				store.Backing = value
+			case "mount":
+				store.Mount = value
+			case "workspace_path":
+				store.WorkspacePath = value
+			case "root":
+				legacyRootKey = true
+			default:
+				return Config{}, fmt.Errorf("config line %d: unknown key %q", lineNo, key)
+			}
+			cfg.Stores[name] = store
+		case "views":
+			switch key {
+			case "tags":
+				cfg.Views.Tags = value
+			case "languages":
+				cfg.Views.Languages = value
+			default:
+				return Config{}, fmt.Errorf("config line %d: unknown key %q", lineNo, key)
+			}
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return Config{}, err
+	}
+	if cfg.Version == 1 || legacyRootKey {
+		return Config{}, &LegacyConfigError{Message: "legacy proj config layout detected; registry data was not changed. Install the schema-v2 config after completing the documented archive/bind-mount setup, then run `proj doctor`"}
 	}
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err
@@ -155,27 +171,43 @@ func parseConfig(text, home string) (Config, error) {
 }
 
 func validateConfig(cfg Config) error {
-	if cfg.Version != schemaVersion {
-		return fmt.Errorf("unsupported config version %d (supported: %d)", cfg.Version, schemaVersion)
+	if cfg.Version != configSchemaVersion {
+		return fmt.Errorf("unsupported config version %d (supported: %d)", cfg.Version, configSchemaVersion)
 	}
-	for _, name := range []string{"active", "archive"} {
-		store, ok := cfg.Stores[name]
-		if !ok || store.Root == "" || !filepath.IsAbs(store.Root) {
-			return fmt.Errorf("store %q must have an absolute root", name)
+	paths := map[string]string{"workspace root": cfg.WorkspaceRoot, "active backing": cfg.Stores["active"].Backing, "archive backing": cfg.Stores["archive"].Backing, "archive workspace path": cfg.Stores["archive"].WorkspacePath, "tag view": cfg.Views.Tags, "language view": cfg.Views.Languages}
+	for label, path := range paths {
+		if path == "" || !filepath.IsAbs(path) {
+			return fmt.Errorf("%s must be an absolute path", label)
 		}
-		if filepath.Clean(store.Root) == string(filepath.Separator) {
-			return fmt.Errorf("store %q root cannot be /", name)
+		if filepath.Clean(path) == string(filepath.Separator) {
+			return fmt.Errorf("%s cannot be /", label)
 		}
 	}
 	archive := cfg.Stores["archive"]
 	if archive.Mount == "" || !filepath.IsAbs(archive.Mount) {
 		return errors.New("archive store must have an absolute mount path")
 	}
-	if !pathWithin(archive.Root, archive.Mount) || filepath.Clean(archive.Root) == filepath.Clean(archive.Mount) {
-		return errors.New("archive root must be a child of the configured archive mount")
+	if filepath.Clean(archive.Mount) == string(filepath.Separator) {
+		return errors.New("archive mount cannot be /")
 	}
-	if filepath.Clean(cfg.Stores["active"].Root) == filepath.Clean(archive.Root) {
-		return errors.New("active and archive roots must differ")
+	if !pathWithin(archive.Backing, archive.Mount) || filepath.Clean(archive.Backing) == filepath.Clean(archive.Mount) {
+		return errors.New("archive backing must be a child of the configured archive mount")
+	}
+	if pathWithin(archive.Backing, cfg.WorkspaceRoot) {
+		return errors.New("physical archive backing must be outside the logical workspace root")
+	}
+	for label, path := range map[string]string{"active backing": cfg.Stores["active"].Backing, "archive workspace path": archive.WorkspacePath, "tag view": cfg.Views.Tags, "language view": cfg.Views.Languages} {
+		if !pathWithin(path, cfg.WorkspaceRoot) || filepath.Clean(path) == filepath.Clean(cfg.WorkspaceRoot) {
+			return fmt.Errorf("%s must be a child of the workspace root", label)
+		}
+	}
+	all := []string{cfg.Stores["active"].Backing, archive.Backing, archive.WorkspacePath, cfg.Views.Tags, cfg.Views.Languages}
+	for i := range all {
+		for j := i + 1; j < len(all); j++ {
+			if pathWithin(all[i], all[j]) || pathWithin(all[j], all[i]) {
+				return fmt.Errorf("configured managed paths must not overlap: %s and %s", all[i], all[j])
+			}
+		}
 	}
 	return nil
 }
@@ -190,13 +222,8 @@ func configText(cfg Config, home string) string {
 		}
 		return path
 	}
-	return fmt.Sprintf("version = %d\n\n[stores.active]\nroot = %s\n\n[stores.archive]\nroot = %s\nmount = %s\n",
-		cfg.Version,
-		strconv.Quote(display(cfg.Stores["active"].Root)),
-		strconv.Quote(display(cfg.Stores["archive"].Root)),
-		strconv.Quote(display(cfg.Stores["archive"].Mount)))
+	return fmt.Sprintf("version = %d\n\n[workspace]\nroot = %s\n\n[stores.active]\nbacking = %s\n\n[stores.archive]\nbacking = %s\nmount = %s\nworkspace_path = %s\n\n[views]\ntags = %s\nlanguages = %s\n", cfg.Version, strconv.Quote(display(cfg.WorkspaceRoot)), strconv.Quote(display(cfg.Stores["active"].Backing)), strconv.Quote(display(cfg.Stores["archive"].Backing)), strconv.Quote(display(cfg.Stores["archive"].Mount)), strconv.Quote(display(cfg.Stores["archive"].WorkspacePath)), strconv.Quote(display(cfg.Views.Tags)), strconv.Quote(display(cfg.Views.Languages)))
 }
-
 func ensureConfig(path string, cfg Config, home string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
@@ -208,10 +235,8 @@ func ensureConfig(path string, cfg Config, home string) error {
 	}
 	return atomicWrite(path, []byte(configText(cfg, home)), 0o600)
 }
-
 func stripComment(s string) string {
-	inString := false
-	escaped := false
+	inString, escaped := false, false
 	for i, r := range s {
 		if escaped {
 			escaped = false
@@ -229,7 +254,6 @@ func stripComment(s string) string {
 	}
 	return s
 }
-
 func splitAssignment(line string) (string, string, bool) {
 	idx := strings.IndexByte(line, '=')
 	if idx < 1 {

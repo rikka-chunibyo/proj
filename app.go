@@ -11,11 +11,12 @@ import (
 	"strings"
 )
 
-const version = "1.1.0"
+const version = "1.2.0"
 
 type App struct {
 	Paths           Paths
 	Config          Config
+	ConfigErr       error
 	Mounts          MountProvider
 	In              io.Reader
 	Out             io.Writer
@@ -38,9 +39,9 @@ func newApp() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, _, err := loadConfig(paths.ConfigFile, home)
-	if err != nil {
-		return nil, err
+	cfg, _, configErr := loadConfig(paths.ConfigFile, home)
+	if configErr != nil {
+		cfg = defaultConfig(home)
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -54,7 +55,7 @@ func newApp() (*App, error) {
 	if info, err := os.Stderr.Stat(); err == nil {
 		progressTTY = info.Mode()&os.ModeCharDevice != 0
 	}
-	return &App{Paths: paths, Config: cfg, Mounts: ProcMountProvider{}, In: os.Stdin, Out: os.Stdout, Err: os.Stderr, CWD: cwd, TTY: tty, ProgressTTY: progressTTY}, nil
+	return &App{Paths: paths, Config: cfg, ConfigErr: configErr, Mounts: ProcMountProvider{}, In: os.Stdin, Out: os.Stdout, Err: os.Stderr, CWD: cwd, TTY: tty, ProgressTTY: progressTTY}, nil
 }
 
 func (a *App) relocationStatus(operation, name, message string) {
@@ -64,6 +65,9 @@ func (a *App) relocationStatus(operation, name, message string) {
 func (a *App) reloadRegistry() (Registry, error) { return loadRegistry(a.Paths.RegistryFile) }
 
 func (a *App) beginMutation() (*FileLock, Registry, error) {
+	if a.ConfigErr != nil {
+		return nil, Registry{}, a.ConfigErr
+	}
 	if err := ensureConfig(a.Paths.ConfigFile, a.Config, a.Paths.Home); err != nil {
 		return nil, Registry{}, fmt.Errorf("create default config: %w", err)
 	}
@@ -79,14 +83,14 @@ func (a *App) beginMutation() (*FileLock, Registry, error) {
 	return lock, reg, nil
 }
 
-func (a *App) syncStoreViews(store string, reg Registry) bool {
-	report, err := reindexStore(a.Config, store, reg, a.Mounts)
+func (a *App) syncViews(reg Registry) bool {
+	report, err := reindexViews(a.Config, reg)
 	if err != nil {
 		fmt.Fprintf(a.Err, "Generated views are incomplete: %v\nRun:\n  proj reindex\n", err)
 		return false
 	}
 	for _, warning := range report.Missing {
-		fmt.Fprintln(a.Err, warning)
+		fmt.Fprintf(a.Err, "%s: canonical active project missing; generated views skipped\n", warning)
 	}
 	for _, warning := range report.Warnings {
 		fmt.Fprintf(a.Err, "Warning: %s\n", warning)
@@ -122,6 +126,14 @@ func (a *App) Run(args []string) error {
 	case "-v", "--version", "version":
 		fmt.Fprintf(a.Out, "proj %s\n", version)
 		return nil
+	}
+	if a.ConfigErr != nil {
+		metadataOnly := args[0] == "list" || args[0] == "find" || args[0] == "doctor" || args[0] == "tag" && len(args) > 1 && args[1] == "list"
+		if !metadataOnly {
+			return a.ConfigErr
+		}
+	}
+	switch args[0] {
 	case "add":
 		return a.cmdAdd(args[1:])
 	case "import":

@@ -21,7 +21,7 @@ func TestImportSameFilesystemAndCWDNotice(t *testing.T) {
 	if err := a.Run([]string{"import", ".", "--tag", "Tooling", "--yes"}); err != nil {
 		t.Fatal(err)
 	}
-	destination := filepath.Join(a.Config.Stores["active"].Root, "projects", "Matrix")
+	destination := filepath.Join(a.Config.Stores["active"].Backing, "Matrix")
 	if _, err := os.Stat(source); !os.IsNotExist(err) {
 		t.Fatalf("source remains: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestImportCrossFilesystemCopyPreservesMetadataAndSymlink(t *testing.T) {
 	if err := a.Run([]string{"import", source, "--yes", "--tag", "Hardware"}); err != nil {
 		t.Fatal(err)
 	}
-	destination := filepath.Join(a.Config.Stores["active"].Root, "projects", "Pulse")
+	destination := filepath.Join(a.Config.Stores["active"].Backing, "Pulse")
 	if _, err := os.Stat(source); !os.IsNotExist(err) {
 		t.Fatal("source not removed")
 	}
@@ -95,7 +95,7 @@ func TestImportSourceChangePreservesSource(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(source, "new.txt")); err != nil {
 		t.Fatal("source lost")
 	}
-	destination := filepath.Join(a.Config.Stores["active"].Root, "projects", "Changing")
+	destination := filepath.Join(a.Config.Stores["active"].Backing, "Changing")
 	if _, err := os.Stat(destination); !os.IsNotExist(err) {
 		t.Fatal("destination masquerades as canonical")
 	}
@@ -131,7 +131,7 @@ func TestFreeSpaceAndENOSPCLeaveSourceIntact(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(source, "data.bin")); err != nil {
 				t.Fatal("source lost")
 			}
-			if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Root, "projects", "Large")); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Backing, "Large")); !os.IsNotExist(err) {
 				t.Fatal("incomplete destination became canonical")
 			}
 			reg, _ := a.reloadRegistry()
@@ -155,7 +155,7 @@ func TestRegistryCommitFailurePreservesBothCrossFilesystem(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "both preserved") {
 		t.Fatalf("commit failure: %v", err)
 	}
-	destination := filepath.Join(a.Config.Stores["active"].Root, "projects", "Both")
+	destination := filepath.Join(a.Config.Stores["active"].Backing, "Both")
 	for _, path := range []string{source, destination} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected preserved %s: %v", path, err)
@@ -186,7 +186,7 @@ func TestRegistryCommitFailureRollsBackSameFilesystem(t *testing.T) {
 	if _, err := os.Stat(source); err != nil {
 		t.Fatal("source not restored")
 	}
-	if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Root, "projects", "Rollback")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Backing, "Rollback")); !os.IsNotExist(err) {
 		t.Fatal("destination retained")
 	}
 }
@@ -204,7 +204,7 @@ func TestCleanupFailurePreservesBothAndJournal(t *testing.T) {
 	if err == nil {
 		t.Fatal("cleanup failure hidden")
 	}
-	destination := filepath.Join(a.Config.Stores["active"].Root, "projects", "KeepBoth")
+	destination := filepath.Join(a.Config.Stores["active"].Backing, "KeepBoth")
 	for _, p := range []string{source, destination} {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("copy %s not preserved: %v", p, err)
@@ -258,19 +258,21 @@ func TestArchiveRestoreSharedEngine(t *testing.T) {
 	if err := saveRegistry(a.Paths.RegistryFile, Registry{Version: 1, Projects: []Project{p}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reindexStore(a.Config, "active", Registry{Version: 1, Projects: []Project{p}}, a.Mounts); err != nil {
+	if _, err := reindexViews(a.Config, Registry{Version: 1, Projects: []Project{p}}); err != nil {
 		t.Fatal(err)
 	}
 	a.RelocationHooks.ForceCopy = true
 	if err := a.Run([]string{"archive", "matrix", "-y"}); err != nil {
 		t.Fatal(err)
 	}
-	archived := filepath.Join(a.Config.Stores["archive"].Root, "projects", "Matrix")
+	archived := filepath.Join(a.Config.Stores["archive"].Backing, "Matrix")
 	if _, err := os.Stat(archived); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(filepath.Join(a.Config.Stores["active"].Root, "by-tag", "keep", "Matrix")); !os.IsNotExist(err) {
-		t.Fatal("stale active view remains after archive")
+	view := filepath.Join(a.Config.Views.Tags, "keep", "Matrix")
+	target, err := os.Readlink(view)
+	if err != nil || target != "../../archive/Matrix" {
+		t.Fatalf("archive view not retargeted: %q, %v", target, err)
 	}
 	reg, _ := a.reloadRegistry()
 	if reg.Projects[0].ID != "stable" || reg.Projects[0].Store != "archive" || !contains(reg.Projects[0].Tags, "keep") {
@@ -300,16 +302,16 @@ func TestArchiveMountAndDestinationCollision(t *testing.T) {
 	_ = source
 	p := Project{ID: "1", Name: "Matrix", Store: "active", GitKind: "none"}
 	_ = saveRegistry(a.Paths.RegistryFile, Registry{Version: 1, Projects: []Project{p}})
-	mount := a.Config.Stores["archive"].Mount
+	healthy := a.Mounts
 	a.Mounts = fakeMounts{}
 	err := a.Run([]string{"archive", "Matrix", "-y"})
 	if err == nil || !strings.Contains(err.Error(), "not mounted") {
 		t.Fatalf("mount: %v", err)
 	}
-	if _, err := os.Stat(a.Config.Stores["archive"].Root); !os.IsNotExist(err) {
-		t.Fatal("archive root created while unmounted")
+	if _, err := os.Stat(filepath.Join(a.Config.Stores["archive"].Backing, "Matrix")); !os.IsNotExist(err) {
+		t.Fatal("archive destination created while unmounted")
 	}
-	a.Mounts = fakeMounts{mount: true}
+	a.Mounts = healthy
 	makeProject(t, a, "archive", "Matrix")
 	err = a.Run([]string{"archive", "Matrix", "-y"})
 	if err == nil || !strings.Contains(err.Error(), "destination already exists") {
@@ -326,7 +328,10 @@ func TestArchiveRootSymlinkIsRefused(t *testing.T) {
 	if err := os.Mkdir(outside, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, a.Config.Stores["archive"].Root); err != nil {
+	if err := os.Remove(a.Config.Stores["archive"].Backing); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, a.Config.Stores["archive"].Backing); err != nil {
 		t.Fatal(err)
 	}
 	source := makeProject(t, a, "active", "Matrix")
@@ -397,7 +402,7 @@ func TestImportRootDetectionAndAmbiguity(t *testing.T) {
 	if err := a.Run([]string{"import", nested, "--yes"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Root, "projects", "Project")); err != nil {
+	if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Backing, "Project")); err != nil {
 		t.Fatal(err)
 	}
 	a2, root2 := testApp(t)
@@ -417,7 +422,7 @@ func TestImportRootDetectionAndAmbiguity(t *testing.T) {
 	if err := a3.Run([]string{"import", plain, "--yes"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(a3.Config.Stores["active"].Root, "projects", "Plain")); err != nil {
+	if _, err := os.Stat(filepath.Join(a3.Config.Stores["active"].Backing, "Plain")); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -436,7 +441,7 @@ func TestImportExactRootBypassesAncestorMarker(t *testing.T) {
 	if err := a.Run([]string{"import", source, "--exact-root", "--yes"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Root, "projects", "small-script", "script.sh")); err != nil {
+	if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Backing, "small-script", "script.sh")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(parent); err != nil {
@@ -471,7 +476,7 @@ func TestExternalSymlinkWarning(t *testing.T) {
 	if !strings.Contains(errString(a), "symlink escapes project root") {
 		t.Fatal(errString(a))
 	}
-	target, _ := os.Readlink(filepath.Join(a.Config.Stores["active"].Root, "projects", "LinkProj", "outside"))
+	target, _ := os.Readlink(filepath.Join(a.Config.Stores["active"].Backing, "LinkProj", "outside"))
 	if target != "../external" {
 		t.Fatal("symlink dereferenced or changed")
 	}

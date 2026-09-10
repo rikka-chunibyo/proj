@@ -28,7 +28,7 @@ func TestAddRefreshTagsPathInfoAndRemove(t *testing.T) {
 	if p.Name != "Matrix" || strings.Join(p.Tags, ",") != "client,minecraft" || !contains(p.Languages, "java") || !contains(p.BuildSystems, "gradle") {
 		t.Fatalf("project: %+v", p)
 	}
-	if _, err := os.Lstat(filepath.Join(a.Config.Stores["active"].Root, "by-tag", "minecraft", "Matrix")); err != nil {
+	if _, err := os.Lstat(filepath.Join(a.Config.Views.Tags, "minecraft", "Matrix")); err != nil {
 		t.Fatal(err)
 	}
 	resetOutput(a)
@@ -102,7 +102,7 @@ func TestAddOutsideAndArchiveUnavailable(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "proj import") {
 		t.Fatalf("outside add: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Root, "projects", "outside")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Backing, "outside")); !os.IsNotExist(err) {
 		t.Fatal("outside add moved data")
 	}
 	arch := makeProject(t, a, "archive", "Cold")
@@ -122,13 +122,13 @@ func TestAddGeneratedViewAndCanonicalSymlinkRefusal(t *testing.T) {
 	root := makeProject(t, a, "active", "Matrix")
 	writeFile(t, filepath.Join(root, "x.go"), "package x", 0o644)
 	reg := Registry{Version: 1, Projects: []Project{{ID: "1", Name: "Matrix", Store: "active", Tags: []string{"go-project"}, Languages: []string{"go"}, GitKind: "none"}}}
-	if _, err := reindexStore(a.Config, "active", reg, a.Mounts); err != nil {
+	if _, err := reindexViews(a.Config, reg); err != nil {
 		t.Fatal(err)
 	}
 	if err := saveRegistry(a.Paths.RegistryFile, emptyRegistry()); err != nil {
 		t.Fatal(err)
 	}
-	view := filepath.Join(a.Config.Stores["active"].Root, "by-tag", "go-project", "Matrix")
+	view := filepath.Join(a.Config.Views.Tags, "go-project", "Matrix")
 	if err := a.Run([]string{"add", view}); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestAddGeneratedViewAndCanonicalSymlinkRefusal(t *testing.T) {
 	}
 	real := filepath.Join(t.TempDir(), "real")
 	_ = os.Mkdir(real, 0o755)
-	link := filepath.Join(a.Config.Stores["active"].Root, "projects", "Link")
+	link := filepath.Join(a.Config.Stores["active"].Backing, "Link")
 	_ = os.Symlink(real, link)
 	if err := a.Run([]string{"add", link}); err == nil {
 		t.Fatal("canonical symlink accepted")
@@ -202,7 +202,7 @@ func TestPathFailsOfflineAndInfoStillWorks(t *testing.T) {
 	if err := a.Run([]string{"info", "cold"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(outString(a), "unavailable/unverified") {
+	if !strings.Contains(outString(a), "Status:\n  offline") {
 		t.Fatal(outString(a))
 	}
 	resetOutput(a)
@@ -258,7 +258,7 @@ func TestRepairPreservesMetadataAndRejectsCollision(t *testing.T) {
 	if found.Name != "Renamed" || found.Store != "archive" || !contains(found.Tags, "keep") || !contains(found.Languages, "go") {
 		t.Fatalf("repair: %+v", found)
 	}
-	takenPath := filepath.Join(a.Config.Stores["active"].Root, "projects", "taken")
+	takenPath := filepath.Join(a.Config.Stores["active"].Backing, "taken")
 	if err := os.MkdirAll(takenPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func TestHelpAndVersionNoStorageMutation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := os.Stat(a.Config.Stores["active"].Root); err != nil {
+	if _, err := os.Stat(a.Config.Stores["active"].Backing); err != nil {
 		t.Fatal("preexisting temp active root vanished")
 	}
 	if _, err := os.Stat(a.Paths.ConfigFile); !os.IsNotExist(err) {

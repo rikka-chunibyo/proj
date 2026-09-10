@@ -152,7 +152,7 @@ func findByNameOrID(reg Registry, value string) (*Project, int, error) {
 	return nil, -1, fmt.Errorf("project %q is not registered", value)
 }
 
-func resolveProject(reg Registry, cfg Config, value string) (*Project, int, error) {
+func resolveProject(reg Registry, cfg Config, mounts MountProvider, value string) (*Project, int, error) {
 	if p, i, err := findByNameOrID(reg, value); err == nil {
 		return p, i, nil
 	}
@@ -163,20 +163,13 @@ func resolveProject(reg Registry, cfg Config, value string) (*Project, int, erro
 	if err != nil {
 		return nil, -1, err
 	}
-	real, err := filepath.EvalSymlinks(abs)
+	canonical, store, err := managedProjectForPath(cfg, mounts, abs, true)
 	if err != nil {
 		return nil, -1, fmt.Errorf("resolve path %s: %w", abs, err)
 	}
+	name := filepath.Base(canonical)
 	for i := range reg.Projects {
-		canonical, err := canonicalPath(cfg, reg.Projects[i])
-		if err != nil {
-			continue
-		}
-		canonicalReal, err := filepath.EvalSymlinks(canonical)
-		if err != nil {
-			continue
-		}
-		if pathWithin(real, canonicalReal) {
+		if reg.Projects[i].Store == store && strings.EqualFold(reg.Projects[i].Name, name) {
 			return &reg.Projects[i], i, nil
 		}
 	}
@@ -186,29 +179,54 @@ func resolveProject(reg Registry, cfg Config, value string) (*Project, int, erro
 // canonicalDirectoryForPath returns the direct child of a configured projects
 // root that contains path. Generated proj views work because EvalSymlinks is
 // applied first. Canonical child symlinks are still rejected by Lstat below.
-func canonicalDirectoryForPath(cfg Config, value string) (string, string, error) {
+func canonicalDirectoryForPath(cfg Config, mounts MountProvider, value string) (string, string, error) {
 	abs, err := filepath.Abs(value)
 	if err != nil {
 		return "", "", err
 	}
-	real, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", "", fmt.Errorf("resolve %s: %w", abs, err)
+	return managedProjectForPath(cfg, mounts, abs, true)
+}
+
+var errOutsideManaged = errors.New("path is outside configured canonical project stores")
+
+// managedProjectForPath maps physical active/archive paths and the logical
+// archive bind mount to the single physical canonical directory. Symlinks are
+// resolved only beneath proj's generated roots; arbitrary external symlinks do
+// not acquire project identity merely because they point at a project.
+func managedProjectForPath(cfg Config, mounts MountProvider, abs string, allowViews bool) (string, string, error) {
+	path := filepath.Clean(abs)
+	if allowViews && (pathWithin(path, cfg.Views.Tags) || pathWithin(path, cfg.Views.Languages)) {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", "", err
+		}
+		path = resolved
 	}
-	for _, storeName := range []string{"active", "archive"} {
-		projectsRoot := filepath.Join(cfg.Stores[storeName].Root, "projects")
-		rel, err := filepath.Rel(projectsRoot, real)
+	for _, candidate := range []struct {
+		root, backing, store string
+		logical              bool
+	}{
+		{root: cfg.Stores["active"].Backing, backing: cfg.Stores["active"].Backing, store: "active"},
+		{root: cfg.Stores["archive"].Backing, backing: cfg.Stores["archive"].Backing, store: "archive"},
+		{root: cfg.Stores["archive"].WorkspacePath, backing: cfg.Stores["archive"].Backing, store: "archive", logical: true},
+	} {
+		rel, err := filepath.Rel(candidate.root, path)
 		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			continue
 		}
+		if candidate.logical {
+			if err := archiveWorkspaceAvailable(cfg, mounts); err != nil {
+				return "", "", fmt.Errorf("archive workspace path is unavailable or misconfigured: %w", err)
+			}
+		}
 		name := strings.Split(rel, string(filepath.Separator))[0]
-		canonical := filepath.Join(projectsRoot, name)
+		canonical := filepath.Join(candidate.backing, name)
 		if _, err := validateRealDirectory(canonical); err != nil {
 			return "", "", err
 		}
-		return canonical, storeName, nil
+		return canonical, candidate.store, nil
 	}
-	return real, "", errors.New("path is outside configured canonical project stores")
+	return path, "", errOutsideManaged
 }
 
 var strongRootMarkers = map[string]bool{

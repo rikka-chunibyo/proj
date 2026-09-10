@@ -22,8 +22,11 @@ func (a *App) cmdAdd(args []string) error {
 		return err
 	}
 	input := a.pathFromArg(pos[0])
-	canonical, store, err := canonicalDirectoryForPath(a.Config, input)
+	canonical, store, err := canonicalDirectoryForPath(a.Config, a.Mounts, input)
 	if err != nil {
+		if !errors.Is(err, errOutsideManaged) {
+			return err
+		}
 		abs, _ := filepath.Abs(input)
 		return fmt.Errorf("Detected project:\n  %s\n\nThis project is not inside a configured proj project store.\n\nNo changes made.\n\nTo explicitly move it into managed storage:\n  proj import %s", abs, shellQuote(abs))
 	}
@@ -67,7 +70,7 @@ func (a *App) cmdAdd(args []string) error {
 	if problem := windowsNameProblem(name); problem != "" {
 		fmt.Fprintf(a.Err, "Warning: project name %q %s.\n", name, problem)
 	}
-	a.syncStoreViews(store, reg)
+	a.syncViews(reg)
 	fmt.Fprintf(a.Out, "Registered %s in the %s store.\n", name, store)
 	return nil
 }
@@ -117,7 +120,7 @@ func (a *App) cmdRefresh(args []string) error {
 			indices = append(indices, i)
 		}
 	} else {
-		_, i, err := resolveProject(reg, a.Config, pos[0])
+		_, i, err := resolveProject(reg, a.Config, a.Mounts, pos[0])
 		if err != nil {
 			return err
 		}
@@ -155,8 +158,8 @@ func (a *App) cmdRefresh(args []string) error {
 			return err
 		}
 	}
-	for store := range affected {
-		a.syncStoreViews(store, reg)
+	if len(affected) > 0 {
+		a.syncViews(reg)
 	}
 	if all {
 		fmt.Fprintf(a.Out, "Refreshed %d project(s); skipped %d.\n", updated, skipped)
@@ -181,7 +184,7 @@ func (a *App) cmdTag(args []string) error {
 			return errors.New("usage: proj tag list [project]")
 		}
 		if len(args) == 2 {
-			p, _, err := resolveProject(reg, a.Config, args[1])
+			p, _, err := resolveProject(reg, a.Config, a.Mounts, args[1])
 			if err != nil {
 				return err
 			}
@@ -214,7 +217,7 @@ func (a *App) cmdTag(args []string) error {
 			return err
 		}
 		defer lock.Close()
-		p, i, err := resolveProject(reg, a.Config, args[1])
+		p, i, err := resolveProject(reg, a.Config, a.Mounts, args[1])
 		if err != nil {
 			return err
 		}
@@ -237,11 +240,7 @@ func (a *App) cmdTag(args []string) error {
 			return err
 		}
 		fmt.Fprintf(a.Out, "Tags updated for %s.\n", p.Name)
-		if err := storeAvailable(a.Config, p.Store, a.Mounts); err != nil {
-			fmt.Fprintf(a.Err, "Warning: registry updated, but %s views are unavailable. Run `proj reindex` when the store returns.\n", p.Store)
-			return nil
-		}
-		a.syncStoreViews(p.Store, reg)
+		a.syncViews(reg)
 		return nil
 	default:
 		return fmt.Errorf("unknown tag command %q", args[0])
@@ -394,8 +393,9 @@ func (a *App) cmdFind(args []string) error {
 
 func scoreProject(cfg Config, p Project, terms []string) (int, bool) {
 	total := 0
-	path, _ := canonicalPath(cfg, p)
-	metadata := append([]string{p.Store, path}, append(append([]string{}, p.Tags...), append(p.Languages, p.BuildSystems...)...)...)
+	backing, _ := canonicalPath(cfg, p)
+	logical, _ := logicalPath(cfg, p)
+	metadata := append([]string{p.Store, backing, logical}, append(append([]string{}, p.Tags...), append(p.Languages, p.BuildSystems...)...)...)
 	for _, term := range terms {
 		term = strings.ToLower(term)
 		best := fuzzyField(term, strings.ToLower(p.Name), true)
@@ -493,16 +493,18 @@ func (a *App) cmdPath(args []string) error {
 	if err != nil {
 		return err
 	}
-	p, _, err := resolveProject(reg, a.Config, args[0])
+	p, _, err := resolveProject(reg, a.Config, a.Mounts, args[0])
 	if err != nil {
 		return err
 	}
-	if err := storeAvailable(a.Config, p.Store, a.Mounts); err != nil {
-		return err
+	if p.Store == "archive" {
+		if err := archiveWorkspaceAvailable(a.Config, a.Mounts); err != nil {
+			return fmt.Errorf("archived project workspace unavailable: %w", err)
+		}
 	}
-	path, _ := canonicalPath(a.Config, *p)
+	path, _ := logicalPath(a.Config, *p)
 	if _, err := validateRealDirectory(path); err != nil {
-		return fmt.Errorf("canonical project unavailable: %w", err)
+		return fmt.Errorf("project navigation path unavailable: %w", err)
 	}
 	fmt.Fprintln(a.Out, path)
 	return nil
@@ -520,18 +522,31 @@ func (a *App) cmdInfo(args []string) error {
 	if err != nil {
 		return err
 	}
-	p, _, err := resolveProject(reg, a.Config, args[0])
+	p, _, err := resolveProject(reg, a.Config, a.Mounts, args[0])
 	if err != nil {
 		return err
 	}
-	path, _ := canonicalPath(a.Config, *p)
+	backing, _ := canonicalPath(a.Config, *p)
+	path, _ := logicalPath(a.Config, *p)
 	status := "available"
-	if err := storeAvailable(a.Config, p.Store, a.Mounts); err != nil {
-		status = "unavailable/unverified"
-	} else if _, err := validateRealDirectory(path); err != nil {
+	if p.Store == "archive" {
+		if err := archiveBackingAvailable(a.Config, a.Mounts); err != nil {
+			status = "offline"
+		} else if _, err := validateRealDirectory(backing); err != nil {
+			status = "missing or invalid"
+		} else if err := archiveWorkspaceAvailable(a.Config, a.Mounts); err != nil {
+			status = "offline (workspace bind mount unavailable or misconfigured)"
+		} else if _, err := validateRealDirectory(path); err != nil {
+			status = "missing or invalid"
+		}
+	} else if _, err := validateRealDirectory(backing); err != nil {
 		status = "missing or invalid"
 	}
-	fmt.Fprintf(a.Out, "%s\n\nID:\n  %s\n\nStore:\n  %s\n\nPath:\n  %s\n\nStatus:\n  %s\n\nLanguages:\n", p.Name, p.ID, p.Store, path, status)
+	fmt.Fprintf(a.Out, "%s\n\nID:\n  %s\n\nStore:\n  %s\n\nPath:\n  %s\n", p.Name, p.ID, p.Store, path)
+	if p.Store == "archive" {
+		fmt.Fprintf(a.Out, "\nBacking path:\n  %s\n", backing)
+	}
+	fmt.Fprintf(a.Out, "\nStatus:\n  %s\n\nLanguages:\n", status)
 	for _, v := range p.Languages {
 		fmt.Fprintf(a.Out, "  %s\n", prettyLanguage(v))
 	}
@@ -575,27 +590,15 @@ func (a *App) cmdReindex(args []string) error {
 		return err
 	}
 	defer lock.Close()
-	fail := false
-	for _, store := range []string{"active", "archive"} {
-		if err := storeAvailable(a.Config, store, a.Mounts); err != nil {
-			fmt.Fprintf(a.Err, "%s store skipped: %v\n", store, err)
-			continue
-		}
-		report, err := reindexStore(a.Config, store, reg, a.Mounts)
-		if err != nil {
-			fmt.Fprintf(a.Err, "%s store reindex failed: %v\n", store, err)
-			fail = true
-			continue
-		}
-		for _, m := range report.Missing {
-			fmt.Fprintln(a.Err, m)
-		}
-		for _, w := range report.Warnings {
-			fmt.Fprintf(a.Err, "Warning: %s\n", w)
-		}
+	report, err := reindexViews(a.Config, reg)
+	if err != nil {
+		return err
 	}
-	if fail {
-		return errors.New("one or more available stores could not be reindexed")
+	for _, w := range report.Warnings {
+		fmt.Fprintf(a.Err, "Warning: %s\n", w)
+	}
+	for _, name := range report.Missing {
+		fmt.Fprintf(a.Err, "%s: canonical active project missing; generated views skipped\n", name)
 	}
 	fmt.Fprintln(a.Out, "Generated views reindexed.")
 	return nil
@@ -618,7 +621,7 @@ func (a *App) cmdRemove(alias string, args []string) error {
 	if err != nil {
 		return err
 	}
-	p, _, err := resolveProject(reg, a.Config, pos[0])
+	p, _, err := resolveProject(reg, a.Config, a.Mounts, pos[0])
 	if err != nil {
 		return err
 	}
@@ -636,7 +639,7 @@ func (a *App) cmdRemove(alias string, args []string) error {
 		return err
 	}
 	defer lock.Close()
-	p, i, err := resolveProject(reg, a.Config, p.ID)
+	p, i, err := resolveProject(reg, a.Config, a.Mounts, p.ID)
 	if err != nil {
 		return err
 	}
@@ -645,9 +648,7 @@ func (a *App) cmdRemove(alias string, args []string) error {
 	if err := saveRegistry(a.Paths.RegistryFile, reg); err != nil {
 		return err
 	}
-	if err := storeAvailable(a.Config, old.Store, a.Mounts); err != nil {
-		fmt.Fprintf(a.Err, "Warning: registry entry removed, but %s views could not be cleaned. Run `proj reindex` when the store returns.\n", old.Store)
-	} else if err := removeProjectViews(a.Config, old); err != nil {
+	if err := removeProjectViews(a.Config, old); err != nil {
 		fmt.Fprintf(a.Err, "Warning: registry entry removed, but generated views are incomplete: %v\nRun:\n  proj reindex\n", err)
 	}
 	fmt.Fprintf(a.Out, "Unregistered %s. Project files were not deleted or moved.\n", old.Name)
@@ -663,7 +664,7 @@ func (a *App) cmdRepair(args []string) error {
 		return err
 	}
 	target := a.pathFromArg(args[1])
-	canonical, store, err := canonicalDirectoryForPath(a.Config, target)
+	canonical, store, err := canonicalDirectoryForPath(a.Config, a.Mounts, target)
 	if err != nil {
 		return fmt.Errorf("repair path must be a real directory directly under a configured projects root; external projects belong via `proj import`: %w", err)
 	}
@@ -685,7 +686,7 @@ func (a *App) cmdRepair(args []string) error {
 		return err
 	}
 	defer lock.Close()
-	_, i, err := resolveProject(reg, a.Config, args[0])
+	_, i, err := resolveProject(reg, a.Config, a.Mounts, args[0])
 	if err != nil {
 		return err
 	}
@@ -700,10 +701,8 @@ func (a *App) cmdRepair(args []string) error {
 	if err := saveRegistry(a.Paths.RegistryFile, reg); err != nil {
 		return err
 	}
-	if err := storeAvailable(a.Config, old.Store, a.Mounts); err == nil {
-		_ = removeProjectViews(a.Config, old)
-	}
-	a.syncStoreViews(store, reg)
+	_ = removeProjectViews(a.Config, old)
+	a.syncViews(reg)
 	fmt.Fprintf(a.Out, "Repaired %s: registry now identifies %s in the %s store. Metadata was preserved; run `proj refresh %s` if detection is stale.\n", old.Name, name, store, shellQuote(name))
 	return nil
 }

@@ -104,7 +104,7 @@ func TestViewsReconcileSafely(t *testing.T) {
 	pulse := makeProject(t, a, "active", "Pulse")
 	_ = pulse
 	reg := Registry{Version: 1, Projects: []Project{{ID: "1", Name: "Matrix", Store: "active", Tags: []string{"minecraft", "client"}, Languages: []string{"java"}, GitKind: "none"}, {ID: "2", Name: "Pulse", Store: "active", Tags: []string{"hardware", "tooling"}, Languages: []string{"cpp", "python"}, GitKind: "none"}}}
-	report, err := reindexStore(a.Config, "active", reg, a.Mounts)
+	report, err := reindexViews(a.Config, reg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,29 +112,33 @@ func TestViewsReconcileSafely(t *testing.T) {
 		t.Fatalf("report %+v", report)
 	}
 	for _, spec := range []struct{ kind, cat, name string }{{"by-tag", "minecraft", "Matrix"}, {"by-tag", "hardware", "Pulse"}, {"by-language", "java", "Matrix"}, {"by-language", "cpp", "Pulse"}, {"by-language", "python", "Pulse"}} {
-		path := filepath.Join(a.Config.Stores["active"].Root, spec.kind, spec.cat, spec.name)
+		viewRoot := a.Config.Views.Tags
+		if spec.kind == "by-language" {
+			viewRoot = a.Config.Views.Languages
+		}
+		path := filepath.Join(viewRoot, spec.cat, spec.name)
 		target, err := os.Readlink(path)
 		if err != nil || target != "../../projects/"+spec.name {
 			t.Fatalf("link %s -> %q, %v", path, target, err)
 		}
 	}
-	staleDir := filepath.Join(a.Config.Stores["active"].Root, "by-tag", "stale")
+	staleDir := filepath.Join(a.Config.Views.Tags, "stale")
 	if err := os.MkdirAll(staleDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("../../projects/Nope", filepath.Join(staleDir, "Nope")); err != nil {
 		t.Fatal(err)
 	}
-	wrong := filepath.Join(a.Config.Stores["active"].Root, "by-tag", "minecraft", "Matrix")
+	wrong := filepath.Join(a.Config.Views.Tags, "minecraft", "Matrix")
 	if err := os.Remove(wrong); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("../../projects/Pulse", wrong); err != nil {
 		t.Fatal(err)
 	}
-	protected := filepath.Join(a.Config.Stores["active"].Root, "by-tag", "minecraft", "notes.txt")
+	protected := filepath.Join(a.Config.Views.Tags, "minecraft", "notes.txt")
 	writeFile(t, protected, "keep", 0o644)
-	report, err = reindexStore(a.Config, "active", reg, a.Mounts)
+	report, err = reindexViews(a.Config, reg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,22 +160,22 @@ func TestViewsReconcileSafely(t *testing.T) {
 func TestViewsSkipMissingAndFullRebuild(t *testing.T) {
 	a, _ := testApp(t)
 	reg := Registry{Version: 1, Projects: []Project{{ID: "1", Name: "Missing", Store: "active", Tags: []string{"x"}, Languages: []string{"go"}, GitKind: "none"}}}
-	report, err := reindexStore(a.Config, "active", reg, a.Mounts)
+	report, err := reindexViews(a.Config, reg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(report.Missing) != 1 {
 		t.Fatalf("missing not reported: %+v", report)
 	}
-	if _, err := os.Lstat(filepath.Join(a.Config.Stores["active"].Root, "by-tag", "x", "Missing")); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(a.Config.Views.Tags, "x", "Missing")); !os.IsNotExist(err) {
 		t.Fatal("broken link created")
 	}
 	makeProject(t, a, "active", "Missing")
-	report, err = reindexStore(a.Config, "active", reg, a.Mounts)
+	report, err = reindexViews(a.Config, reg)
 	if err != nil || len(report.Missing) != 0 {
 		t.Fatalf("rebuild: %+v %v", report, err)
 	}
-	if _, err := os.Lstat(filepath.Join(a.Config.Stores["active"].Root, "by-language", "go", "Missing")); err != nil {
+	if _, err := os.Lstat(filepath.Join(a.Config.Views.Languages, "go", "Missing")); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -183,12 +187,12 @@ func TestGeneratedRootSymlinkIsRefused(t *testing.T) {
 	if err := os.Mkdir(outside, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	viewRoot := filepath.Join(a.Config.Stores["active"].Root, "by-tag")
+	viewRoot := a.Config.Views.Tags
 	if err := os.Symlink(outside, viewRoot); err != nil {
 		t.Fatal(err)
 	}
 	reg := Registry{Version: 1, Projects: []Project{{ID: "1", Name: "Matrix", Store: "active", Tags: []string{"tag"}, GitKind: "none"}}}
-	if _, err := reindexStore(a.Config, "active", reg, a.Mounts); err == nil {
+	if _, err := reindexViews(a.Config, reg); err == nil {
 		t.Fatal("generated-root symlink accepted")
 	}
 	entries, err := os.ReadDir(outside)

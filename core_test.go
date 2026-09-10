@@ -10,31 +10,55 @@ import (
 	"time"
 )
 
-type fakeMounts map[string]bool
+type fakeMounts struct{ records []MountRecord }
 
-func (f fakeMounts) IsMount(path string) (bool, error) { return f[filepath.Clean(path)], nil }
+func (f fakeMounts) IsMount(path string) (bool, error) {
+	_, ok := exactMountRecord(f.records, path)
+	return ok, nil
+}
+func (f fakeMounts) MountRecords() ([]MountRecord, error) {
+	return append([]MountRecord(nil), f.records...), nil
+}
+
+func healthyFakeMounts(mount, backing, logical string) fakeMounts {
+	rel, _ := filepath.Rel(mount, backing)
+	return fakeMounts{records: []MountRecord{
+		{Device: "8:1", Root: "/", MountPoint: mount, FSType: "virtiofs", Options: []string{"rw"}},
+		{Device: "8:1", Root: filepath.Join("/", rel), MountPoint: logical, FSType: "none", Options: []string{"rw"}},
+	}}
+}
 
 func testApp(t *testing.T) (*App, string) {
 	t.Helper()
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
-	active := filepath.Join(root, "active")
+	workspace := filepath.Join(root, "home", "code")
+	active := filepath.Join(workspace, "projects")
 	mount := filepath.Join(root, "mnt")
-	archive := filepath.Join(mount, "code")
-	for _, dir := range []string{home, active, mount} {
+	archive := filepath.Join(mount, "archive", "code")
+	logicalArchive := filepath.Join(workspace, "archive")
+	for _, dir := range []string{home, active, archive, logicalArchive} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	paths := Paths{Home: home, ConfigFile: filepath.Join(root, "config", "proj", "config.toml"), RegistryFile: filepath.Join(root, "data", "proj", "projects.toml"), StateDir: filepath.Join(root, "state", "proj")}
-	cfg := Config{Version: 1, Stores: map[string]StoreConfig{"active": {Root: active}, "archive": {Root: archive, Mount: mount}}}
-	a := &App{Paths: paths, Config: cfg, Mounts: fakeMounts{mount: true}, In: strings.NewReader(""), Out: &bytes.Buffer{}, Err: &bytes.Buffer{}, CWD: root, TTY: false}
+	cfg := Config{
+		Version:       configSchemaVersion,
+		WorkspaceRoot: workspace,
+		Stores: map[string]StoreConfig{
+			"active":  {Backing: active},
+			"archive": {Backing: archive, Mount: mount, WorkspacePath: logicalArchive},
+		},
+		Views: ViewConfig{Tags: filepath.Join(workspace, "by-tag"), Languages: filepath.Join(workspace, "by-language")},
+	}
+	a := &App{Paths: paths, Config: cfg, Mounts: healthyFakeMounts(mount, archive, logicalArchive), In: strings.NewReader(""), Out: &bytes.Buffer{}, Err: &bytes.Buffer{}, CWD: root, TTY: false}
 	return a, root
 }
 
 func makeProject(t *testing.T, a *App, store, name string) string {
 	t.Helper()
-	root := filepath.Join(a.Config.Stores[store].Root, "projects", name)
+	root := filepath.Join(a.Config.Stores[store].Backing, name)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +107,7 @@ func TestConfigRoundTripAndMalformed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Stores["active"].Root != a.Config.Stores["active"].Root {
+	if cfg.Stores["active"].Backing != a.Config.Stores["active"].Backing {
 		t.Fatalf("roundtrip: %+v", cfg)
 	}
 	if _, err := parseConfig("version = 99\n", a.Paths.Home); err == nil {
@@ -232,27 +256,27 @@ func TestCanonicalResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"Matrix", "matrix", "MATRIX", "MaTrIx", "stable-id"} {
-		p, _, err := resolveProject(reg, a.Config, name)
+		p, _, err := resolveProject(reg, a.Config, a.Mounts, name)
 		if err != nil || p.Name != "Matrix" {
 			t.Fatalf("resolve %q: %+v %v", name, p, err)
 		}
 	}
-	if _, _, err := resolveProject(reg, a.Config, "Mattrix"); err == nil {
+	if _, _, err := resolveProject(reg, a.Config, a.Mounts, "Mattrix"); err == nil {
 		t.Fatal("fuzzy direct resolution")
 	}
 	nested := filepath.Join(path, "src", "main")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p, _, err := resolveProject(reg, a.Config, nested)
+	p, _, err := resolveProject(reg, a.Config, a.Mounts, nested)
 	if err != nil || p.Name != "Matrix" {
 		t.Fatalf("nested resolve: %v", err)
 	}
-	if _, err := reindexStore(a.Config, "active", reg, a.Mounts); err != nil {
+	if _, err := reindexViews(a.Config, reg); err != nil {
 		t.Fatal(err)
 	}
-	for _, view := range []string{filepath.Join(a.Config.Stores["active"].Root, "by-tag", "minecraft", "Matrix"), filepath.Join(a.Config.Stores["active"].Root, "by-language", "java", "Matrix")} {
-		p, _, err := resolveProject(reg, a.Config, view)
+	for _, view := range []string{filepath.Join(a.Config.Views.Tags, "minecraft", "Matrix"), filepath.Join(a.Config.Views.Languages, "java", "Matrix")} {
+		p, _, err := resolveProject(reg, a.Config, a.Mounts, view)
 		if err != nil || p.Name != "Matrix" {
 			t.Fatalf("view resolve %s: %v", view, err)
 		}
@@ -265,10 +289,7 @@ func TestValidationRejectsCanonicalSymlinkAndProtectedPaths(t *testing.T) {
 	if err := os.Mkdir(real, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projects := filepath.Join(a.Config.Stores["active"].Root, "projects")
-	if err := os.MkdirAll(projects, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	projects := a.Config.Stores["active"].Backing
 	link := filepath.Join(projects, "Link")
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
@@ -276,7 +297,7 @@ func TestValidationRejectsCanonicalSymlinkAndProtectedPaths(t *testing.T) {
 	if _, err := validateRealDirectory(link); err == nil {
 		t.Fatal("canonical symlink accepted")
 	}
-	for _, path := range []string{"/", a.Paths.Home, a.Config.Stores["active"].Root, projects} {
+	for _, path := range []string{"/", a.Paths.Home, a.Config.WorkspaceRoot, projects} {
 		if err := validateSafeSource(path, a.Paths, a.Config); err == nil {
 			t.Errorf("protected source accepted: %s", path)
 		}

@@ -21,7 +21,7 @@ func TestDoctorOfflineArchiveIsNotMassMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := outString(a)
-	if !strings.Contains(out, "Archive store: UNAVAILABLE") || !strings.Contains(out, "2 archived project(s)") {
+	if !strings.Contains(out, "HDD backing mount unavailable") || !strings.Contains(out, "2 archived project(s)") {
 		t.Fatal(out)
 	}
 	if strings.Contains(out, "ColdOne: canonical project missing") || strings.Contains(out, "ColdTwo: canonical project missing") {
@@ -51,12 +51,12 @@ func TestDoctorFindsMissingUnregisteredViewsAndTransaction(t *testing.T) {
 		t.Fatal("doctor should fail on missing active project")
 	}
 	out := outString(a)
-	for _, want := range []string{"canonical project missing", "unregistered canonical directory", "incomplete relocation transaction txn-test", "No changes were made"} {
+	for _, want := range []string{"canonical backing project missing", "unregistered canonical directory", "incomplete relocation transaction txn-test", "No changes were made"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q:\n%s", want, out)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Root, "projects", "Unregistered")); err != nil {
+	if _, err := os.Stat(filepath.Join(a.Config.Stores["active"].Backing, "Unregistered")); err != nil {
 		t.Fatal("doctor mutated data")
 	}
 	if _, err := os.Stat(filepath.Join(a.Paths.StateDir, "transactions", "txn-test.toml")); err != nil {
@@ -71,7 +71,7 @@ func TestDoctorReportsBadGeneratedObjectsAndEscapes(t *testing.T) {
 	if err := saveRegistry(a.Paths.RegistryFile, reg); err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(a.Config.Stores["active"].Root, "by-tag")
+	root := a.Config.Views.Tags
 	if err := os.MkdirAll(filepath.Join(root, "safe"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestDoctorReportsBadGeneratedObjectsAndEscapes(t *testing.T) {
 		t.Fatal("escaping view should be error")
 	}
 	out := outString(a)
-	if !strings.Contains(out, "generated link escapes") || !strings.Contains(out, "generated path is not a symlink") {
+	if !strings.Contains(out, "generated link escapes") || !strings.Contains(out, "unexpected regular file or directory") {
 		t.Fatal(out)
 	}
 	b, err := os.ReadFile(filepath.Join(root, "safe", "Matrix"))

@@ -1,0 +1,16 @@
+version = 2
+
+[workspace]
+root = "~/code"
+
+[stores.active]
+backing = "~/code/projects"
+
+[stores.archive]
+backing = "/mnt/hdd/archive/code"
+mount = "/mnt/hdd"
+workspace_path = "~/code/archive"
+
+[views]
+tags = "~/code/by-tag"
+languages = "~/code/by-language"

@@ -544,15 +544,17 @@ func (a *App) cmdImport(args []string) error {
 		return fmt.Errorf("unknown store %q", store)
 	}
 	input := a.pathFromArg(pos[0])
-	if canonical, _, err := canonicalDirectoryForPath(a.Config, input); err == nil {
+	if canonical, _, canonicalErr := canonicalDirectoryForPath(a.Config, a.Mounts, input); canonicalErr == nil {
 		reg, e := a.reloadRegistry()
 		if e != nil {
 			return e
 		}
-		if p, _, e := resolveProject(reg, a.Config, canonical); e == nil {
+		if p, _, e := resolveProject(reg, a.Config, a.Mounts, canonical); e == nil {
 			return fmt.Errorf("%s is already a registered canonical project; import is not needed", p.Name)
 		}
 		return fmt.Errorf("%s is already in canonical managed storage; use `proj add %s`", canonical, shellQuote(canonical))
+	} else if !errors.Is(canonicalErr, errOutsideManaged) {
+		return canonicalErr
 	}
 	var source string
 	if exactRoot {
@@ -587,8 +589,10 @@ func (a *App) cmdImport(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := storeAvailable(a.Config, store, a.Mounts); err != nil {
-		return err
+	if store == "archive" {
+		if err := archiveReadyForWrite(a.Config, a.Mounts); err != nil {
+			return err
+		}
 	}
 	detection, err := detectProject(source)
 	if err != nil {
@@ -606,7 +610,7 @@ func (a *App) cmdImport(args []string) error {
 	for _, link := range links {
 		fmt.Fprintf(a.Err, "Warning: symlink escapes project root and may change meaning after relocation: %s\n", link)
 	}
-	destination := filepath.Join(a.Config.Stores[store].Root, "projects", name)
+	destination := filepath.Join(a.Config.Stores[store].Backing, name)
 	ok, err := a.confirm(fmt.Sprintf("Import project %q?\n\nFrom:\n  %s\n\nTo:\n  %s\n\nThis will move the complete project into the %s store.\n\nProceed? [y/N] ", name, source, destination, store), yes)
 	if err != nil {
 		return err
@@ -628,9 +632,13 @@ func (a *App) cmdImport(args []string) error {
 		return err
 	}
 	a.relocationStatus("import", name, "Regenerating generated views...")
-	viewsOK := a.syncStoreViews(store, reg)
+	viewsOK := a.syncViews(reg)
 	fmt.Fprintf(a.Out, "Imported %s into the %s store.\n", name, store)
-	a.printMovedCWD(source, destination)
+	displayDestination := destination
+	if store == "archive" {
+		displayDestination = filepath.Join(a.Config.Stores["archive"].WorkspacePath, name)
+	}
+	a.printMovedCWD(source, displayDestination)
 	if !viewsOK {
 		fmt.Fprintln(a.Err, "Project relocation succeeded, but generated views are incomplete.\nRun:\n  proj reindex")
 	}
@@ -720,7 +728,7 @@ func (a *App) cmdArchiveRestore(operation string, args []string) error {
 	if err != nil {
 		return err
 	}
-	p, _, err := resolveProject(reg, a.Config, pos[0])
+	p, _, err := resolveProject(reg, a.Config, a.Mounts, pos[0])
 	if err != nil {
 		return err
 	}
@@ -740,11 +748,13 @@ func (a *App) cmdArchiveRestore(operation string, args []string) error {
 	if err := storeAvailable(a.Config, sourceStore, a.Mounts); err != nil {
 		return err
 	}
-	if err := storeAvailable(a.Config, destStore, a.Mounts); err != nil {
-		return err
+	if destStore == "archive" {
+		if err := archiveReadyForWrite(a.Config, a.Mounts); err != nil {
+			return err
+		}
 	}
 	source, _ := canonicalPath(a.Config, *p)
-	destination := filepath.Join(a.Config.Stores[destStore].Root, "projects", p.Name)
+	destination := filepath.Join(a.Config.Stores[destStore].Backing, p.Name)
 	_, _, links, err := scanManifest(source)
 	if err != nil {
 		return err
@@ -765,7 +775,7 @@ func (a *App) cmdArchiveRestore(operation string, args []string) error {
 		return err
 	}
 	defer lock.Close()
-	current, _, err := resolveProject(reg, a.Config, p.ID)
+	current, _, err := resolveProject(reg, a.Config, a.Mounts, p.ID)
 	if err != nil {
 		return err
 	}
@@ -775,16 +785,14 @@ func (a *App) cmdArchiveRestore(operation string, args []string) error {
 		return err
 	}
 	a.relocationStatus(operation, current.Name, "Regenerating generated views...")
-	oldViews := true
-	if err := storeAvailable(a.Config, sourceStore, a.Mounts); err == nil {
-		if err := removeProjectViews(a.Config, oldProject); err != nil {
-			oldViews = false
-		}
-	}
-	newViews := a.syncStoreViews(destStore, reg)
+	newViews := a.syncViews(reg)
 	fmt.Fprintf(a.Out, "%s moved successfully to the %s store.\n", current.Name, destStore)
-	a.printMovedCWD(source, destination)
-	if !oldViews || !newViews {
+	displayDestination := destination
+	if destStore == "archive" {
+		displayDestination = filepath.Join(a.Config.Stores["archive"].WorkspacePath, current.Name)
+	}
+	a.printMovedCWD(source, displayDestination)
+	if !newViews {
 		fmt.Fprintln(a.Err, "Project relocation succeeded, but generated views are incomplete.\nRun:\n  proj reindex")
 	}
 	return nil

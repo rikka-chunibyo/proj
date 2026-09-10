@@ -8,56 +8,62 @@ import (
 	"sort"
 )
 
-type ViewReport struct {
-	Warnings []string
-	Missing  []string
-}
+type ViewReport struct{ Warnings, Missing []string }
 
-func reindexStore(cfg Config, storeName string, reg Registry, mounts MountProvider) (ViewReport, error) {
+func reindexViews(cfg Config, reg Registry) (ViewReport, error) {
 	var report ViewReport
-	if err := storeAvailable(cfg, storeName, mounts); err != nil {
-		return report, err
-	}
-	store := cfg.Stores[storeName]
-	projectsRoot := filepath.Join(store.Root, "projects")
-	if err := ensureRealDirectory(projectsRoot, 0o755); err != nil {
+	if err := ensureWorkspace(cfg); err != nil {
 		return report, err
 	}
 	desiredTag := map[string]map[string]string{}
 	desiredLang := map[string]map[string]string{}
 	for _, p := range reg.Projects {
-		if p.Store != storeName {
-			continue
-		}
-		canonical := filepath.Join(projectsRoot, p.Name)
-		info, err := os.Lstat(canonical)
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			report.Missing = append(report.Missing, fmt.Sprintf("%s: canonical project missing or invalid; generated views skipped", p.Name))
-			continue
-		}
 		if err := validateProjectName(p.Name); err != nil {
 			return report, fmt.Errorf("unsafe project name in view data: %w", err)
+		}
+		// Active projects are local and verifiable, so avoid manufacturing a new
+		// broken link when one is missing. Archived links are registry-backed
+		// workspace metadata and deliberately remain present while the HDD is
+		// offline (or while its filesystem state cannot otherwise be verified).
+		if p.Store == "active" {
+			physical, err := canonicalPath(cfg, p)
+			if err != nil {
+				return report, err
+			}
+			if _, err := validateRealDirectory(physical); err != nil {
+				report.Missing = append(report.Missing, p.Name)
+				continue
+			}
+		}
+		logical, err := logicalPath(cfg, p)
+		if err != nil {
+			return report, err
 		}
 		for _, tag := range p.Tags {
 			if normalized, err := normalizeTag(tag); err != nil || normalized != tag {
 				return report, fmt.Errorf("unsafe tag view component %q", tag)
 			}
-			addDesired(desiredTag, tag, p.Name, "../../projects/"+p.Name)
+			target, err := filepath.Rel(filepath.Join(cfg.Views.Tags, tag), logical)
+			if err != nil {
+				return report, err
+			}
+			addDesired(desiredTag, tag, p.Name, target)
 		}
 		for _, lang := range p.Languages {
 			if err := validateMetadataID("language", lang); err != nil {
 				return report, err
 			}
-			addDesired(desiredLang, lang, p.Name, "../../projects/"+p.Name)
+			target, err := filepath.Rel(filepath.Join(cfg.Views.Languages, lang), logical)
+			if err != nil {
+				return report, err
+			}
+			addDesired(desiredLang, lang, p.Name, target)
 		}
 	}
 	for _, spec := range []struct {
 		root    string
 		desired map[string]map[string]string
-	}{
-		{filepath.Join(store.Root, "by-tag"), desiredTag},
-		{filepath.Join(store.Root, "by-language"), desiredLang},
-	} {
+	}{{cfg.Views.Tags, desiredTag}, {cfg.Views.Languages, desiredLang}} {
 		warnings, err := reconcileViewRoot(spec.root, spec.desired)
 		report.Warnings = append(report.Warnings, warnings...)
 		if err != nil {
@@ -165,15 +171,14 @@ func reconcileViewRoot(root string, desired map[string]map[string]string) ([]str
 }
 
 func removeProjectViews(cfg Config, p Project) error {
-	store := cfg.Stores[p.Store]
 	for _, pair := range []struct {
 		root   string
 		values []string
-	}{
-		{filepath.Join(store.Root, "by-tag"), p.Tags},
-		{filepath.Join(store.Root, "by-language"), p.Languages},
-	} {
+	}{{cfg.Views.Tags, p.Tags}, {cfg.Views.Languages, p.Languages}} {
 		if _, err := validateRealDirectory(pair.root); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return err
 		}
 		for _, value := range pair.values {
@@ -198,7 +203,7 @@ func removeProjectViews(cfg Config, p Project) error {
 			if err := os.Remove(link); err != nil {
 				return err
 			}
-			_ = os.Remove(filepath.Dir(link))
+			_ = os.Remove(category)
 		}
 	}
 	return nil
