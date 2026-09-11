@@ -52,6 +52,7 @@ func TestDetectionIgnoresDataGeneratedAndSymlinks(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(root, "node_modules", "bad.go"), "x", 0o644)
 	writeFile(t, filepath.Join(root, ".tools", "toolchain", "bad.py"), "x", 0o644)
+	writeFile(t, filepath.Join(root, "third_party", "upstream", "bad.cpp"), "x", 0o644)
 	writeFile(t, filepath.Join(root, "target", "bad.rs"), "x", 0o644)
 	if err := os.Symlink(root, filepath.Join(root, "loop")); err != nil {
 		t.Fatal(err)
