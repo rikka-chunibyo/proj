@@ -19,6 +19,7 @@ type Detection struct {
 
 var ignoredScanDirs = map[string]bool{
 	".git": true, ".idea": true, ".vs": true, ".gradle": true,
+	".tools":       true,
 	"node_modules": true, "build": true, "out": true, "target": true,
 	"dist": true, ".venv": true, "venv": true, "vendor": true,
 	"__pycache__": true,
